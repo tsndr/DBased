@@ -11,6 +11,7 @@
 # Flatpak / Packaging
 .flatpak-builder/
 build-dir/
+*.pkg.tar*
 
 # IDEs & Editors
 .idea/

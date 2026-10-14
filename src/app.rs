@@ -145,6 +145,7 @@ pub fn run_app() -> gtk::glib::ExitCode {
 
     app.connect_startup(|_| {
         sourceview5::init();
+        gtk::Window::set_default_icon_name(APP_ID);
         load_css();
     });
 

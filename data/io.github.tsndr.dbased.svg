@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="128" height="128" viewBox="0 0 128 128" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- App squircle base shadow & gradients -->
+    <linearGradient id="bg_shadow" x1="12" y1="64" x2="116" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0f172a"/>
+      <stop offset="0.06" stop-color="#1e293b"/>
+      <stop offset="0.94" stop-color="#1e293b"/>
+      <stop offset="1" stop-color="#0f172a"/>
+    </linearGradient>
+    <linearGradient id="bg_main" x1="64" y1="10" x2="64" y2="112" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#273659"/>
+      <stop offset="1" stop-color="#162038"/>
+    </linearGradient>
+    <linearGradient id="bg_border" x1="64" y1="10" x2="64" y2="112" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.04"/>
+    </linearGradient>
+
+    <!-- Database cylinder gradients -->
+    <linearGradient id="cyl_body" x1="28" y1="0" x2="88" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3584e4"/>
+      <stop offset="0.35" stop-color="#62a0ea"/>
+      <stop offset="0.75" stop-color="#3584e4"/>
+      <stop offset="1" stop-color="#1c71d8"/>
+    </linearGradient>
+    <linearGradient id="cyl_top" x1="58" y1="22" x2="58" y2="42" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#99c1f1"/>
+      <stop offset="1" stop-color="#62a0ea"/>
+    </linearGradient>
+    <linearGradient id="cyl_mid" x1="58" y1="44" x2="58" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#78aeed"/>
+      <stop offset="1" stop-color="#3584e4"/>
+    </linearGradient>
+
+    <!-- Table overlay card gradient -->
+    <linearGradient id="card_bg" x1="82" y1="62" x2="82" y2="104" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#f6f5f4"/>
+      <stop offset="1" stop-color="#deddda"/>
+    </linearGradient>
+    <linearGradient id="card_header" x1="60" y1="62" x2="104" y2="62" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#2ec27e"/>
+      <stop offset="1" stop-color="#26a269"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Base 3D bottom ledge (GNOME HIG style) -->
+  <rect x="12" y="16" width="104" height="102" rx="24" fill="url(#bg_shadow)"/>
+
+  <!-- Main squircle surface -->
+  <rect x="12" y="10" width="104" height="102" rx="24" fill="url(#bg_main)"/>
+  <rect x="13" y="11" width="102" height="100" rx="23" stroke="url(#bg_border)" stroke-width="2"/>
+
+  <!-- Subtle background grid lines -->
+  <g stroke="#ffffff" stroke-opacity="0.05" stroke-width="1">
+    <line x1="12" y1="36" x2="116" y2="36"/>
+    <line x1="12" y1="61" x2="116" y2="61"/>
+    <line x1="12" y1="86" x2="116" y2="86"/>
+    <line x1="38" y1="10" x2="38" y2="112"/>
+    <line x1="64" y1="10" x2="64" y2="112"/>
+    <line x1="90" y1="10" x2="90" y2="112"/>
+  </g>
+
+  <!-- Database Drop Shadow -->
+  <ellipse cx="56" cy="91" rx="31" ry="11" fill="#090d16" fill-opacity="0.55"/>
+
+  <!-- Bottom Cylinder Tier -->
+  <path d="M26 67V83C26 88.5228 39.4315 93 56 93C72.5685 93 86 88.5228 86 83V67H26Z" fill="url(#cyl_body)"/>
+  <ellipse cx="56" cy="67" rx="30" ry="10" fill="url(#cyl_mid)"/>
+  <circle cx="38" cy="80" r="2.5" fill="#8ff0a4"/>
+  <rect x="44" y="78.5" width="16" height="3" rx="1.5" fill="#ffffff" fill-opacity="0.45"/>
+
+  <!-- Middle Cylinder Tier -->
+  <path d="M26 49V64C26 69.5228 39.4315 74 56 74C72.5685 74 86 69.5228 86 64V49H26Z" fill="url(#cyl_body)"/>
+  <path d="M26 64C26 69.5228 39.4315 74 56 74C72.5685 74 86 69.5228 86 64" stroke="#162038" stroke-width="2.5"/>
+  <ellipse cx="56" cy="49" rx="30" ry="10" fill="url(#cyl_mid)"/>
+  <circle cx="38" cy="61" r="2.5" fill="#8ff0a4"/>
+  <rect x="44" y="59.5" width="20" height="3" rx="1.5" fill="#ffffff" fill-opacity="0.55"/>
+
+  <!-- Top Cylinder Tier -->
+  <path d="M26 31V46C26 51.5228 39.4315 56 56 56C72.5685 56 86 51.5228 86 46V31H26Z" fill="url(#cyl_body)"/>
+  <path d="M26 46C26 51.5228 39.4315 56 56 56C72.5685 56 86 51.5228 86 46" stroke="#162038" stroke-width="2.5"/>
+  <ellipse cx="56" cy="31" rx="30" ry="10" fill="url(#cyl_top)"/>
+  <ellipse cx="56" cy="31" rx="28.5" ry="8.5" stroke="#ffffff" stroke-opacity="0.35" stroke-width="1.2"/>
+  <circle cx="38" cy="43" r="2.5" fill="#8ff0a4"/>
+  <rect x="44" y="41.5" width="24" height="3" rx="1.5" fill="#ffffff" fill-opacity="0.65"/>
+
+  <!-- Table / Query Badge Shadow -->
+  <rect x="58" y="62" width="48" height="44" rx="10" fill="#090d16" fill-opacity="0.5"/>
+
+  <!-- Table / Query Badge Card -->
+  <rect x="58" y="59" width="48" height="44" rx="10" fill="url(#card_bg)"/>
+  <path d="M58 69C58 63.4772 62.4772 59 68 59H96C101.523 59 106 63.4772 106 69V71H58V69Z" fill="url(#card_header)"/>
+
+  <!-- Header dots -->
+  <circle cx="65.5" cy="65" r="2" fill="#ffffff" fill-opacity="0.85"/>
+  <circle cx="72" cy="65" r="2" fill="#ffffff" fill-opacity="0.85"/>
+  <rect x="78" y="63.5" width="20" height="3" rx="1.5" fill="#ffffff" fill-opacity="0.85"/>
+
+  <!-- Spreadsheet Grid Lines & Cells inside Badge -->
+  <line x1="58" y1="81" x2="106" y2="81" stroke="#c0bfbc" stroke-width="1.5"/>
+  <line x1="58" y1="91" x2="106" y2="91" stroke="#c0bfbc" stroke-width="1.5"/>
+  <line x1="76" y1="71" x2="76" y2="103" stroke="#c0bfbc" stroke-width="1.5"/>
+
+  <!-- Row 1 cells -->
+  <rect x="63" y="74.5" width="9" height="3.5" rx="1.5" fill="#3584e4"/>
+  <rect x="80" y="74.5" width="19" height="3.5" rx="1.5" fill="#5e5c64"/>
+
+  <!-- Row 2 cells -->
+  <rect x="63" y="84.5" width="9" height="3.5" rx="1.5" fill="#3584e4"/>
+  <rect x="80" y="84.5" width="14" height="3.5" rx="1.5" fill="#5e5c64"/>
+
+  <!-- Row 3 cells -->
+  <rect x="63" y="94.5" width="9" height="3.5" rx="1.5" fill="#3584e4"/>
+  <rect x="80" y="94.5" width="21" height="3.5" rx="1.5" fill="#2ec27e"/>
+</svg>
