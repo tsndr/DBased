@@ -22,6 +22,87 @@ impl ColumnInfo {
     pub fn is_long_text(&self) -> bool {
         is_long_text_data_type(&self.data_type)
     }
+
+    pub fn enum_values(&self) -> Option<Vec<String>> {
+        parse_enum_data_type(&self.data_type).or_else(|| parse_enum_data_type(&self.extra))
+    }
+}
+
+/// If `data_type` represents an `ENUM(...)` column definition, returns the list of
+/// allowed enum values in declaration order.
+pub fn parse_enum_data_type(data_type: &str) -> Option<Vec<String>> {
+    let trimmed = data_type.trim();
+    let (prefix, rest) = trimmed.split_once('(')?;
+    if !prefix.trim().eq_ignore_ascii_case("enum") {
+        return None;
+    }
+    let (inner, _) = rest.rsplit_once(')')?;
+    let inner = inner.trim();
+    if inner.is_empty() {
+        return None;
+    }
+
+    let mut values = Vec::new();
+    let mut chars = inner.chars().peekable();
+
+    while let Some(&ch) = chars.peek() {
+        if ch.is_whitespace() || ch == ',' {
+            chars.next();
+            continue;
+        }
+        if ch == '\'' || ch == '"' {
+            let quote = ch;
+            chars.next();
+            let mut val = String::new();
+            while let Some(c) = chars.next() {
+                if c == '\\' {
+                    if let Some(escaped) = chars.next() {
+                        val.push(escaped);
+                    }
+                } else if c == quote {
+                    if chars.peek() == Some(&quote) {
+                        chars.next();
+                        val.push(quote);
+                    } else {
+                        break;
+                    }
+                } else {
+                    val.push(c);
+                }
+            }
+            values.push(val);
+            while let Some(&next_ch) = chars.peek() {
+                if next_ch == ',' {
+                    chars.next();
+                    break;
+                } else if next_ch.is_whitespace() {
+                    chars.next();
+                } else {
+                    break;
+                }
+            }
+        } else {
+            let mut val = String::new();
+            while let Some(&c) = chars.peek() {
+                if c == ',' {
+                    chars.next();
+                    break;
+                }
+                val.push(c);
+                chars.next();
+            }
+            let token = val.trim();
+            if !token.is_empty() {
+                values.push(token.to_string());
+            }
+        }
+    }
+
+    if values.is_empty() {
+        None
+    } else {
+        Some(values)
+    }
 }
 
 /// Returns true if the SQL column data type represents a long or multiline text type
@@ -29,7 +110,7 @@ impl ColumnInfo {
 /// `JSON`, `JSONB`, `XML`, unbounded `VARCHAR`, or `VARCHAR(N)` with `N > 255`).
 pub fn is_long_text_data_type(data_type: &str) -> bool {
     let dt = data_type.trim().to_ascii_lowercase();
-    if dt.is_empty() {
+    if dt.is_empty() || dt.starts_with("enum(") || dt.starts_with("set(") {
         return false;
     }
     if dt.contains("text")

@@ -108,6 +108,32 @@ box.spreadsheet-cell {
     background: transparent;
 }
 
+.spreadsheet-cell-dropdown {
+    min-height: 28px;
+}
+
+.spreadsheet-cell-dropdown > button {
+    border-radius: 0;
+    border: none;
+    box-shadow: none;
+    outline: none;
+    padding: 2px 8px;
+    min-height: 28px;
+    background: transparent;
+    font-weight: normal;
+}
+
+.spreadsheet-cell-dropdown > button:hover,
+.spreadsheet-cell-dropdown > button:active,
+.spreadsheet-cell-dropdown > button:checked {
+    background: alpha(@window_fg_color, 0.05);
+}
+
+.spreadsheet-cell-dropdown.cell-null > button label {
+    color: alpha(@window_fg_color, 0.45);
+    font-style: italic;
+}
+
 .cell-ref-btn {
     min-height: 22px;
     min-width: 22px;

@@ -23,6 +23,7 @@ use std::rc::Rc;
 const DEFAULT_INDEX_COL_WIDTH: i32 = 64;
 const DEFAULT_LONG_TEXT_PANEL_WIDTH: i32 = 380;
 const FK_BTN_EXTRA_WIDTH: i32 = 30;
+const ENUM_DROPDOWN_EXTRA_WIDTH: i32 = 28;
 const MOUSE_BUTTON_BACK: u32 = 8;
 const MOUSE_BUTTON_FORWARD: u32 = 9;
 
@@ -1517,69 +1518,50 @@ impl ContentTab {
                     .iter()
                     .find(|fk| fk.column_name == col_info.name)
                     .cloned();
-                let is_long_text = col_info.is_long_text();
 
-                let (cell_box, entry, ref_btn_opt, long_text_btn_opt) = self
-                    .create_spreadsheet_cell(
-                        &page.database,
-                        &current_val,
-                        row_editable,
-                        is_long_text,
-                        fk_opt.as_ref(),
-                    );
-                if sample_entry.is_none() {
-                    sample_entry = Some(entry.clone());
-                }
-                if self
-                    .dirty_cells
-                    .borrow()
-                    .contains_key(&(row_idx, col_info.name.clone()))
-                {
-                    cell_box.add_css_class("cell-dirty");
-                }
+                if let Some(enum_vals) = col_info.enum_values() {
+                    let (cell_box, dropdown, options_rc, ref_btn_opt) = self
+                        .create_enum_spreadsheet_cell(
+                            &page.database,
+                            &enum_vals,
+                            col_info.is_nullable,
+                            &current_val,
+                            row_editable,
+                            fk_opt.as_ref(),
+                        );
+                    if self
+                        .dirty_cells
+                        .borrow()
+                        .contains_key(&(row_idx, col_info.name.clone()))
+                    {
+                        cell_box.add_css_class("cell-dirty");
+                    }
 
-                if is_long_text {
-                    let target = LongTextPanelTarget {
-                        kind: LongTextTargetKind::Existing {
-                            row_idx,
-                            original_val,
-                            editable: row_editable,
-                        },
-                        col_info: col_info.clone(),
-                        cell_box: cell_box.clone(),
-                        cell_entry: entry.clone(),
-                        ref_btn_opt,
-                        fk_opt,
-                    };
-                    self.attach_long_text_cell_handlers(target, long_text_btn_opt);
-                } else {
                     let tab_clone = self.clone();
                     let col_name = col_info.name.clone();
                     let orig = original_val.clone();
                     let cell_box_ref = cell_box.clone();
-                    entry.connect_changed(move |e| {
-                        let new_val = DbValue::from_editor_str(&e.text());
+                    dropdown.connect_selected_notify(move |dd| {
+                        let new_val = options_rc
+                            .get(dd.selected() as usize)
+                            .cloned()
+                            .unwrap_or(DbValue::Null);
                         if let (Some(btn), Some(fk)) = (&ref_btn_opt, &fk_opt) {
                             Self::update_ref_button_state(btn, fk, &new_val);
                         }
+                        if new_val.is_null() {
+                            dd.add_css_class("cell-null");
+                        } else {
+                            dd.remove_css_class("cell-null");
+                        }
                         if new_val != orig {
                             cell_box_ref.add_css_class("cell-dirty");
-                            if new_val.is_null() {
-                                e.add_css_class("cell-null");
-                            } else {
-                                e.remove_css_class("cell-null");
-                            }
                             tab_clone
                                 .dirty_cells
                                 .borrow_mut()
                                 .insert((row_idx, col_name.clone()), new_val);
                         } else {
                             cell_box_ref.remove_css_class("cell-dirty");
-                            if orig.is_null() {
-                                e.add_css_class("cell-null");
-                            } else {
-                                e.remove_css_class("cell-null");
-                            }
                             tab_clone
                                 .dirty_cells
                                 .borrow_mut()
@@ -1587,10 +1569,85 @@ impl ContentTab {
                         }
                         tab_clone.update_dirty_badge();
                     });
-                }
 
-                self.grid
-                    .attach(&cell_box, (col_idx + 1) as i32, grid_row, 1, 1);
+                    self.grid
+                        .attach(&cell_box, (col_idx + 1) as i32, grid_row, 1, 1);
+                } else {
+                    let is_long_text = col_info.is_long_text();
+
+                    let (cell_box, entry, ref_btn_opt, long_text_btn_opt) = self
+                        .create_spreadsheet_cell(
+                            &page.database,
+                            &current_val,
+                            row_editable,
+                            is_long_text,
+                            fk_opt.as_ref(),
+                        );
+                    if sample_entry.is_none() {
+                        sample_entry = Some(entry.clone());
+                    }
+                    if self
+                        .dirty_cells
+                        .borrow()
+                        .contains_key(&(row_idx, col_info.name.clone()))
+                    {
+                        cell_box.add_css_class("cell-dirty");
+                    }
+
+                    if is_long_text {
+                        let target = LongTextPanelTarget {
+                            kind: LongTextTargetKind::Existing {
+                                row_idx,
+                                original_val,
+                                editable: row_editable,
+                            },
+                            col_info: col_info.clone(),
+                            cell_box: cell_box.clone(),
+                            cell_entry: entry.clone(),
+                            ref_btn_opt,
+                            fk_opt,
+                        };
+                        self.attach_long_text_cell_handlers(target, long_text_btn_opt);
+                    } else {
+                        let tab_clone = self.clone();
+                        let col_name = col_info.name.clone();
+                        let orig = original_val.clone();
+                        let cell_box_ref = cell_box.clone();
+                        entry.connect_changed(move |e| {
+                            let new_val = DbValue::from_editor_str(&e.text());
+                            if let (Some(btn), Some(fk)) = (&ref_btn_opt, &fk_opt) {
+                                Self::update_ref_button_state(btn, fk, &new_val);
+                            }
+                            if new_val != orig {
+                                cell_box_ref.add_css_class("cell-dirty");
+                                if new_val.is_null() {
+                                    e.add_css_class("cell-null");
+                                } else {
+                                    e.remove_css_class("cell-null");
+                                }
+                                tab_clone
+                                    .dirty_cells
+                                    .borrow_mut()
+                                    .insert((row_idx, col_name.clone()), new_val);
+                            } else {
+                                cell_box_ref.remove_css_class("cell-dirty");
+                                if orig.is_null() {
+                                    e.add_css_class("cell-null");
+                                } else {
+                                    e.remove_css_class("cell-null");
+                                }
+                                tab_clone
+                                    .dirty_cells
+                                    .borrow_mut()
+                                    .remove(&(row_idx, col_name.clone()));
+                            }
+                            tab_clone.update_dirty_badge();
+                        });
+                    }
+
+                    self.grid
+                        .attach(&cell_box, (col_idx + 1) as i32, grid_row, 1, 1);
+                }
             }
         }
 
@@ -1610,9 +1667,29 @@ impl ContentTab {
             let hdr_w = measure_single_line_text(hdr_lbl, btn_label) + HEADER_EXTRA_PADDING;
 
             let has_fk = relations.iter().any(|fk| fk.column_name == col_info.name);
-            let is_long_text = col_info.is_long_text();
-            let mut widest_val: Option<&DbValue> = None;
+            let enum_vals_opt = col_info.enum_values();
+            let is_enum = enum_vals_opt.is_some();
+            let is_long_text = !is_enum && col_info.is_long_text();
+            let mut widest_val: Option<DbValue> = None;
             let mut max_score: usize = 0;
+
+            if let Some(ref enum_vals) = enum_vals_opt {
+                for ev in enum_vals {
+                    let score: usize = ev
+                        .chars()
+                        .take(MAX_MEASURE_CHARS)
+                        .map(|c| if c.is_ascii() { 1 } else { 2 })
+                        .sum();
+                    if widest_val.is_none() || score > max_score {
+                        max_score = score;
+                        widest_val = Some(DbValue::Text(ev.clone()));
+                    }
+                }
+                if col_info.is_nullable && (widest_val.is_none() || 4 > max_score) {
+                    max_score = 4;
+                    widest_val = Some(DbValue::Null);
+                }
+            }
 
             for (row_idx, row_data) in page.rows.iter().enumerate() {
                 let val = dirty
@@ -1633,7 +1710,7 @@ impl ContentTab {
                 let score = char_score + fk_bonus;
                 if widest_val.is_none() || score > max_score {
                     max_score = score;
-                    widest_val = Some(val);
+                    widest_val = Some(val.clone());
                 }
             }
 
@@ -1653,11 +1730,11 @@ impl ContentTab {
                 let score = char_score + fk_bonus;
                 if widest_val.is_none() || score > max_score {
                     max_score = score;
-                    widest_val = Some(val);
+                    widest_val = Some(val.clone());
                 }
             }
 
-            let cell_w = if let Some(val) = widest_val {
+            let cell_w = if let Some(ref val) = widest_val {
                 let preview_cow;
                 let txt = if is_long_text {
                     preview_cow = format_long_text_preview(val);
@@ -1676,7 +1753,9 @@ impl ContentTab {
                     0
                 };
                 let long_text_extra = if is_long_text { FK_BTN_EXTRA_WIDTH } else { 0 };
-                let raw_cell_w = text_px + CELL_EXTRA_PADDING + fk_extra + long_text_extra;
+                let enum_extra = if is_enum { ENUM_DROPDOWN_EXTRA_WIDTH } else { 0 };
+                let raw_cell_w =
+                    text_px + CELL_EXTRA_PADDING + fk_extra + long_text_extra + enum_extra;
                 if is_long_text {
                     raw_cell_w.min(MAX_LONG_TEXT_AUTO_COL_WIDTH)
                 } else {
@@ -1710,6 +1789,138 @@ impl ContentTab {
                 val.display_text()
             )));
         }
+    }
+
+    fn create_enum_spreadsheet_cell(
+        &self,
+        database: &str,
+        enum_values: &[String],
+        is_nullable: bool,
+        val: &DbValue,
+        editable: bool,
+        fk: Option<&ForeignKeyInfo>,
+    ) -> (
+        gtk::Box,
+        gtk::DropDown,
+        Rc<Vec<DbValue>>,
+        Option<gtk::Button>,
+    ) {
+        let cell_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        cell_box.add_css_class("spreadsheet-cell");
+        cell_box.set_overflow(gtk::Overflow::Hidden);
+
+        let (options, selected_idx) =
+            build_enum_dropdown_options(enum_values, is_nullable, val);
+        let options_rc = Rc::new(options);
+
+        let labels: Vec<&str> = options_rc.iter().map(|v| v.display_text()).collect();
+        let model = gtk::StringList::new(&labels);
+        let dropdown = gtk::DropDown::new(Some(model), gtk::Expression::NONE);
+        dropdown.add_css_class("spreadsheet-cell-dropdown");
+        dropdown.set_hexpand(true);
+        dropdown.set_valign(gtk::Align::Fill);
+        dropdown.set_sensitive(editable);
+
+        let btn_factory = gtk::SignalListItemFactory::new();
+        btn_factory.connect_setup(|_, obj| {
+            if let Some(list_item) = obj.downcast_ref::<gtk::ListItem>() {
+                let lbl = gtk::Label::new(None);
+                lbl.add_css_class("monospace");
+                lbl.set_halign(gtk::Align::Fill);
+                lbl.set_xalign(0.0);
+                lbl.set_hexpand(true);
+                lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                lbl.set_max_width_chars(1);
+                list_item.set_child(Some(&lbl));
+            }
+        });
+        btn_factory.connect_bind(|_, obj| {
+            if let Some(list_item) = obj.downcast_ref::<gtk::ListItem>() {
+                if let (Some(lbl), Some(str_obj)) = (
+                    list_item
+                        .child()
+                        .and_then(|c| c.downcast::<gtk::Label>().ok()),
+                    list_item
+                        .item()
+                        .and_then(|i| i.downcast::<gtk::StringObject>().ok()),
+                ) {
+                    lbl.set_text(&str_obj.string());
+                }
+            }
+        });
+        dropdown.set_factory(Some(&btn_factory));
+
+        let list_factory = gtk::SignalListItemFactory::new();
+        let options_for_list = options_rc.clone();
+        list_factory.connect_setup(|_, obj| {
+            if let Some(list_item) = obj.downcast_ref::<gtk::ListItem>() {
+                let lbl = gtk::Label::new(None);
+                lbl.add_css_class("monospace");
+                lbl.set_halign(gtk::Align::Start);
+                lbl.set_xalign(0.0);
+                list_item.set_child(Some(&lbl));
+            }
+        });
+        list_factory.connect_bind(move |_, obj| {
+            if let Some(list_item) = obj.downcast_ref::<gtk::ListItem>() {
+                if let (Some(lbl), Some(str_obj)) = (
+                    list_item
+                        .child()
+                        .and_then(|c| c.downcast::<gtk::Label>().ok()),
+                    list_item
+                        .item()
+                        .and_then(|i| i.downcast::<gtk::StringObject>().ok()),
+                ) {
+                    lbl.set_text(&str_obj.string());
+                    let is_null_item = options_for_list
+                        .get(list_item.position() as usize)
+                        .is_some_and(|v| v.is_null());
+                    if is_null_item {
+                        lbl.add_css_class("cell-null");
+                    } else {
+                        lbl.remove_css_class("cell-null");
+                    }
+                }
+            }
+        });
+        dropdown.set_list_factory(Some(&list_factory));
+
+        dropdown.set_selected(selected_idx as u32);
+        if options_rc.get(selected_idx).is_some_and(|v| v.is_null()) {
+            dropdown.add_css_class("cell-null");
+        }
+
+        cell_box.append(&dropdown);
+
+        let ref_btn_opt = if let Some(fk_info) = fk {
+            let btn = gtk::Button::from_icon_name("go-next-symbolic");
+            btn.add_css_class("flat");
+            btn.add_css_class("cell-ref-btn");
+            btn.set_valign(gtk::Align::Center);
+            btn.set_focus_on_click(false);
+            Self::update_ref_button_state(&btn, fk_info, val);
+
+            let tab_clone = self.clone();
+            let dropdown_ref = dropdown.clone();
+            let options_for_fk = options_rc.clone();
+            let db_name = database.to_string();
+            let target_table = fk_info.referenced_table.clone();
+            let target_col = fk_info.referenced_column.clone();
+            btn.connect_clicked(move |_| {
+                let current_val = options_for_fk
+                    .get(dropdown_ref.selected() as usize)
+                    .cloned()
+                    .unwrap_or(DbValue::Null);
+                tab_clone.follow_reference(&db_name, &target_table, &target_col, &current_val);
+            });
+
+            cell_box.append(&btn);
+            Some(btn)
+        } else {
+            None
+        };
+
+        (cell_box, dropdown, options_rc, ref_btn_opt)
     }
 
     fn create_spreadsheet_cell(
@@ -1810,11 +2021,7 @@ impl ContentTab {
 
         let mut initial_map = HashMap::new();
         for col in &page.columns {
-            if let Some(def) = &col.default_value {
-                initial_map.insert(col.name.clone(), DbValue::Text(def.clone()));
-            } else {
-                initial_map.insert(col.name.clone(), DbValue::Null);
-            }
+            initial_map.insert(col.name.clone(), initial_draft_value_for_column(col));
         }
 
         let draft_idx = {
@@ -1857,94 +2064,158 @@ impl ContentTab {
             let val = draft_map
                 .get(&col_info.name)
                 .cloned()
-                .unwrap_or(DbValue::Null);
+                .unwrap_or_else(|| initial_draft_value_for_column(col_info));
             let fk_opt = relations
                 .iter()
                 .find(|fk| fk.column_name == col_info.name)
                 .cloned();
             let has_fk = fk_opt.is_some();
-            let is_long_text = col_info.is_long_text();
-            let (cell_box, entry, ref_btn_opt, long_text_btn_opt) = self.create_spreadsheet_cell(
-                &database,
-                &val,
-                true,
-                is_long_text,
-                fk_opt.as_ref(),
-            );
-            cell_box.add_css_class("cell-dirty");
 
-            if is_long_text {
-                let initial_val = col_info
-                    .default_value
-                    .as_ref()
-                    .map(|d| DbValue::Text(d.clone()))
-                    .unwrap_or(DbValue::Null);
-                let target = LongTextPanelTarget {
-                    kind: LongTextTargetKind::Draft {
-                        draft_idx,
-                        initial_val,
-                    },
-                    col_info: col_info.clone(),
-                    cell_box: cell_box.clone(),
-                    cell_entry: entry.clone(),
-                    ref_btn_opt,
-                    fk_opt,
-                };
-                self.attach_long_text_cell_handlers(target, long_text_btn_opt);
-            } else {
+            if let Some(enum_vals) = col_info.enum_values() {
+                let (cell_box, dropdown, options_rc, ref_btn_opt) = self
+                    .create_enum_spreadsheet_cell(
+                        &database,
+                        &enum_vals,
+                        col_info.is_nullable,
+                        &val,
+                        true,
+                        fk_opt.as_ref(),
+                    );
+                cell_box.add_css_class("cell-dirty");
+
+                if let Some(selected_val) = options_rc.get(dropdown.selected() as usize) {
+                    if let Some(row_map) = self.draft_rows.borrow_mut().get_mut(draft_idx) {
+                        row_map.insert(col_info.name.clone(), selected_val.clone());
+                    }
+                }
+
                 let tab_clone = self.clone();
                 let col_name = col_info.name.clone();
-                entry.connect_changed(move |e| {
-                    let new_val = DbValue::from_editor_str(&e.text());
+                dropdown.connect_selected_notify(move |dd| {
+                    let new_val = options_rc
+                        .get(dd.selected() as usize)
+                        .cloned()
+                        .unwrap_or(DbValue::Null);
                     if let (Some(btn), Some(fk)) = (&ref_btn_opt, &fk_opt) {
                         Self::update_ref_button_state(btn, fk, &new_val);
                     }
                     if new_val.is_null() {
-                        e.add_css_class("cell-null");
+                        dd.add_css_class("cell-null");
                     } else {
-                        e.remove_css_class("cell-null");
+                        dd.remove_css_class("cell-null");
                     }
                     if let Some(row_map) = tab_clone.draft_rows.borrow_mut().get_mut(draft_idx) {
                         row_map.insert(col_name.clone(), new_val);
                     }
                 });
-            }
 
-            self.grid
-                .attach(&cell_box, (col_idx + 1) as i32, grid_row, 1, 1);
+                self.grid
+                    .attach(&cell_box, (col_idx + 1) as i32, grid_row, 1, 1);
 
-            let preview_cow;
-            let txt = if is_long_text {
-                preview_cow = format_long_text_preview(&val);
-                preview_cow.as_str()
-            } else {
-                val.display_text()
-            };
-            let fk_extra = if has_fk && !val.is_null() && !txt.is_empty() {
-                FK_BTN_EXTRA_WIDTH
-            } else {
-                0
-            };
-            let long_text_extra = if is_long_text { FK_BTN_EXTRA_WIDTH } else { 0 };
-            let raw_cell_w =
-                measure_single_line_text(&entry, txt) + CELL_EXTRA_PADDING + fk_extra + long_text_extra;
-            let cell_w = if is_long_text {
-                raw_cell_w.min(MAX_LONG_TEXT_AUTO_COL_WIDTH)
-            } else {
-                raw_cell_w
-            };
-            if let Some(nat_w) = self.natural_col_widths.borrow_mut().get_mut(col_idx) {
-                *nat_w = (*nat_w).max(cell_w);
-            }
+                let txt = val.display_text();
+                let fk_extra = if has_fk && !val.is_null() && !txt.is_empty() {
+                    FK_BTN_EXTRA_WIDTH
+                } else {
+                    0
+                };
+                let cell_w = measure_single_line_text(&cell_box, txt)
+                    + CELL_EXTRA_PADDING
+                    + fk_extra
+                    + ENUM_DROPDOWN_EXTRA_WIDTH;
+                if let Some(nat_w) = self.natural_col_widths.borrow_mut().get_mut(col_idx) {
+                    *nat_w = (*nat_w).max(cell_w);
+                }
 
-            if col_idx == 0 {
-                let e_clone = entry.clone();
-                gtk::glib::idle_add_local_once(move || {
-                    e_clone.grab_focus();
-                    if !is_long_text {
-                        e_clone.select_region(0, -1);
-                    }
-                });
+                if col_idx == 0 {
+                    let dd_clone = dropdown.clone();
+                    gtk::glib::idle_add_local_once(move || {
+                        dd_clone.grab_focus();
+                    });
+                }
+            } else {
+                let is_long_text = col_info.is_long_text();
+                let (cell_box, entry, ref_btn_opt, long_text_btn_opt) = self
+                    .create_spreadsheet_cell(
+                        &database,
+                        &val,
+                        true,
+                        is_long_text,
+                        fk_opt.as_ref(),
+                    );
+                cell_box.add_css_class("cell-dirty");
+
+                if is_long_text {
+                    let initial_val = initial_draft_value_for_column(col_info);
+                    let target = LongTextPanelTarget {
+                        kind: LongTextTargetKind::Draft {
+                            draft_idx,
+                            initial_val,
+                        },
+                        col_info: col_info.clone(),
+                        cell_box: cell_box.clone(),
+                        cell_entry: entry.clone(),
+                        ref_btn_opt,
+                        fk_opt,
+                    };
+                    self.attach_long_text_cell_handlers(target, long_text_btn_opt);
+                } else {
+                    let tab_clone = self.clone();
+                    let col_name = col_info.name.clone();
+                    entry.connect_changed(move |e| {
+                        let new_val = DbValue::from_editor_str(&e.text());
+                        if let (Some(btn), Some(fk)) = (&ref_btn_opt, &fk_opt) {
+                            Self::update_ref_button_state(btn, fk, &new_val);
+                        }
+                        if new_val.is_null() {
+                            e.add_css_class("cell-null");
+                        } else {
+                            e.remove_css_class("cell-null");
+                        }
+                        if let Some(row_map) = tab_clone.draft_rows.borrow_mut().get_mut(draft_idx)
+                        {
+                            row_map.insert(col_name.clone(), new_val);
+                        }
+                    });
+                }
+
+                self.grid
+                    .attach(&cell_box, (col_idx + 1) as i32, grid_row, 1, 1);
+
+                let preview_cow;
+                let txt = if is_long_text {
+                    preview_cow = format_long_text_preview(&val);
+                    preview_cow.as_str()
+                } else {
+                    val.display_text()
+                };
+                let fk_extra = if has_fk && !val.is_null() && !txt.is_empty() {
+                    FK_BTN_EXTRA_WIDTH
+                } else {
+                    0
+                };
+                let long_text_extra = if is_long_text { FK_BTN_EXTRA_WIDTH } else { 0 };
+                let raw_cell_w = measure_single_line_text(&entry, txt)
+                    + CELL_EXTRA_PADDING
+                    + fk_extra
+                    + long_text_extra;
+                let cell_w = if is_long_text {
+                    raw_cell_w.min(MAX_LONG_TEXT_AUTO_COL_WIDTH)
+                } else {
+                    raw_cell_w
+                };
+                if let Some(nat_w) = self.natural_col_widths.borrow_mut().get_mut(col_idx) {
+                    *nat_w = (*nat_w).max(cell_w);
+                }
+
+                if col_idx == 0 {
+                    let e_clone = entry.clone();
+                    gtk::glib::idle_add_local_once(move || {
+                        e_clone.grab_focus();
+                        if !is_long_text {
+                            e_clone.select_region(0, -1);
+                        }
+                    });
+                }
             }
         }
     }
@@ -2111,6 +2382,73 @@ impl ContentTab {
     }
 }
 
+pub fn build_enum_dropdown_options(
+    enum_values: &[String],
+    is_nullable: bool,
+    current_val: &DbValue,
+) -> (Vec<DbValue>, usize) {
+    let mut options: Vec<DbValue> = enum_values
+        .iter()
+        .map(|v| DbValue::Text(v.clone()))
+        .collect();
+
+    if is_nullable {
+        options.push(DbValue::Null);
+    }
+
+    let selected_idx = if let Some(pos) = options.iter().position(|v| v == current_val) {
+        pos
+    } else {
+        match current_val {
+            DbValue::Text(s) => {
+                if let Some(pos) = options.iter().position(|v| match v {
+                    DbValue::Text(opt_s) => opt_s.eq_ignore_ascii_case(s),
+                    DbValue::Null => false,
+                }) {
+                    pos
+                } else {
+                    options.push(DbValue::Text(s.clone()));
+                    options.len() - 1
+                }
+            }
+            DbValue::Null => 0,
+        }
+    };
+
+    (options, selected_idx)
+}
+
+pub fn initial_draft_value_for_column(col: &ColumnInfo) -> DbValue {
+    if let Some(def) = &col.default_value {
+        let cleaned_def = if col.enum_values().is_some() {
+            def.split("::")
+                .next()
+                .unwrap_or(def)
+                .trim()
+                .trim_matches('\'')
+                .to_string()
+        } else {
+            def.clone()
+        };
+        if col.is_nullable && cleaned_def.eq_ignore_ascii_case("NULL") {
+            DbValue::Null
+        } else {
+            DbValue::Text(cleaned_def)
+        }
+    } else if !col.is_nullable {
+        if let Some(first_enum) = col
+            .enum_values()
+            .and_then(|vals| vals.into_iter().next())
+        {
+            DbValue::Text(first_enum)
+        } else {
+            DbValue::Null
+        }
+    } else {
+        DbValue::Null
+    }
+}
+
 fn export_page_to_csv(page: &TablePage, path: &std::path::Path) -> anyhow::Result<()> {
     let mut wtr = csv::Writer::from_path(path)?;
     let headers: Vec<&str> = page.columns.iter().map(|c| c.name.as_str()).collect();
@@ -2152,7 +2490,7 @@ fn export_page_to_json(page: &TablePage, path: &std::path::Path) -> anyhow::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::models::is_long_text_data_type;
+    use crate::db::models::{is_long_text_data_type, parse_enum_data_type};
 
     #[test]
     fn test_columns_show_full_content_when_available_width_allows() {
@@ -2209,6 +2547,7 @@ mod tests {
         assert!(!is_long_text_data_type("varchar(64)"));
         assert!(!is_long_text_data_type("boolean"));
         assert!(!is_long_text_data_type("timestamp"));
+        assert!(!is_long_text_data_type("enum('plain_text','rich_text')"));
     }
 
     #[test]
@@ -2217,6 +2556,103 @@ mod tests {
         assert_eq!(
             format_long_text_preview(&DbValue::Text("first\nsecond\r\nthird".to_string())),
             "first ↵ second ↵ third"
+        );
+    }
+
+    #[test]
+    fn test_parse_enum_data_type_and_dropdown_options() {
+        assert_eq!(
+            parse_enum_data_type("enum('active','pending','archived')"),
+            Some(vec![
+                "active".to_string(),
+                "pending".to_string(),
+                "archived".to_string()
+            ])
+        );
+        assert_eq!(
+            parse_enum_data_type("ENUM('it''s', 'a, b', '')"),
+            Some(vec![
+                "it's".to_string(),
+                "a, b".to_string(),
+                "".to_string()
+            ])
+        );
+        assert_eq!(parse_enum_data_type("varchar(255)"), None);
+        assert_eq!(parse_enum_data_type("set('a','b')"), None);
+
+        let enum_vals = vec!["active".to_string(), "pending".to_string()];
+
+        // Non-nullable enum: only enum values, no NULL option
+        let (non_null_opts, non_null_idx) = build_enum_dropdown_options(
+            &enum_vals,
+            false,
+            &DbValue::Text("pending".to_string()),
+        );
+        assert_eq!(
+            non_null_opts,
+            vec![
+                DbValue::Text("active".to_string()),
+                DbValue::Text("pending".to_string()),
+            ]
+        );
+        assert_eq!(non_null_idx, 1);
+
+        // Nullable enum: includes NULL option and selects it when value is Null
+        let (null_opts, null_idx) =
+            build_enum_dropdown_options(&enum_vals, true, &DbValue::Null);
+        assert_eq!(
+            null_opts,
+            vec![
+                DbValue::Text("active".to_string()),
+                DbValue::Text("pending".to_string()),
+                DbValue::Null,
+            ]
+        );
+        assert_eq!(null_idx, 2);
+    }
+
+    #[test]
+    fn test_initial_draft_value_for_enum_columns() {
+        let non_nullable_enum = ColumnInfo {
+            ordinal: 1,
+            name: "status".to_string(),
+            data_type: "enum('active','pending')".to_string(),
+            is_nullable: false,
+            is_primary_key: false,
+            default_value: None,
+            extra: String::new(),
+        };
+        assert_eq!(
+            initial_draft_value_for_column(&non_nullable_enum),
+            DbValue::Text("active".to_string())
+        );
+
+        let nullable_enum = ColumnInfo {
+            is_nullable: true,
+            ..non_nullable_enum.clone()
+        };
+        assert_eq!(initial_draft_value_for_column(&nullable_enum), DbValue::Null);
+
+        let pg_enum_with_default = ColumnInfo {
+            ordinal: 2,
+            name: "role".to_string(),
+            data_type: "user_role".to_string(),
+            is_nullable: false,
+            is_primary_key: false,
+            default_value: Some("'member'::user_role".to_string()),
+            extra: "enum('admin','member','guest')".to_string(),
+        };
+        assert_eq!(
+            pg_enum_with_default.enum_values(),
+            Some(vec![
+                "admin".to_string(),
+                "member".to_string(),
+                "guest".to_string()
+            ])
+        );
+        assert_eq!(
+            initial_draft_value_for_column(&pg_enum_with_default),
+            DbValue::Text("member".to_string())
         );
     }
 }

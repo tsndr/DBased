@@ -589,7 +589,17 @@ impl DatabaseDriver for PostgresDriver {
                 c.is_nullable, \
                 CASE WHEN pk.column_name IS NOT NULL THEN 'PRI' ELSE '' END AS column_key, \
                 c.column_default, \
-                COALESCE(c.identity_generation, '') AS extra \
+                COALESCE( \
+                    c.identity_generation, \
+                    ( \
+                        SELECT 'enum(' || string_agg(quote_literal(e.enumlabel), ',' ORDER BY e.enumsortorder) || ')' \
+                        FROM pg_type t \
+                        JOIN pg_namespace n ON n.oid = t.typnamespace \
+                        JOIN pg_enum e ON e.enumtypid = t.oid \
+                        WHERE n.nspname = c.udt_schema AND t.typname = c.udt_name \
+                    ), \
+                    '' \
+                ) AS extra \
              FROM information_schema.columns c \
              LEFT JOIN ( \
                  SELECT kcu.column_name \
