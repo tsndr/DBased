@@ -1,4 +1,4 @@
-use crate::config::bookmarks::ConnectionProfile;
+use crate::config::bookmarks::{ConnectionProfile, DbEngine};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -331,6 +331,7 @@ pub enum BackendEvent {
     ConnectionTestResult(Result<String, String>),
     Connected {
         connection_name: String,
+        engine: DbEngine,
         engine_label: String,
         databases: Vec<String>,
         selected_database: Option<String>,

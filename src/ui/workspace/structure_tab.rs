@@ -1,3 +1,4 @@
+use crate::config::bookmarks::DbEngine;
 use crate::db::models::{
     BackendCommand, ColumnAlterOp, ColumnInfo, ColumnSpec, IndexAlterOp, IndexInfo, IndexSpec,
 };
@@ -32,6 +33,79 @@ const INDEX_HEADERS: &[(&str, i32)] = &[
 const INDEX_TYPES: &[&str] = &["INDEX", "UNIQUE", "PRIMARY", "FULLTEXT", "SPATIAL"];
 const INDEX_METHODS: &[&str] = &["Default", "BTREE", "HASH", "GIN", "GIST", "BRIN"];
 
+const MYSQL_COLUMN_DATA_TYPES: &[&str] = &[
+    "VARCHAR",
+    "CHAR",
+    "TEXT",
+    "MEDIUMTEXT",
+    "LONGTEXT",
+    "INT",
+    "BIGINT",
+    "SMALLINT",
+    "TINYINT",
+    "BOOLEAN",
+    "DECIMAL",
+    "NUMERIC",
+    "FLOAT",
+    "DOUBLE",
+    "REAL",
+    "DATE",
+    "TIME",
+    "DATETIME",
+    "TIMESTAMP",
+    "JSON",
+    "ENUM",
+    "SET",
+    "BINARY",
+    "VARBINARY",
+    "BIT",
+    "BLOB",
+];
+
+const POSTGRES_COLUMN_DATA_TYPES: &[&str] = &[
+    "VARCHAR",
+    "CHAR",
+    "TEXT",
+    "INT",
+    "BIGINT",
+    "SMALLINT",
+    "SERIAL",
+    "BIGSERIAL",
+    "BOOLEAN",
+    "DECIMAL",
+    "NUMERIC",
+    "FLOAT",
+    "DOUBLE PRECISION",
+    "REAL",
+    "DATE",
+    "TIME",
+    "TIMESTAMP",
+    "TIMESTAMPTZ",
+    "UUID",
+    "JSON",
+    "JSONB",
+    "BIT",
+    "VARBIT",
+    "BYTEA",
+];
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TypeParamKind {
+    Length,
+    PrecisionScale,
+    FloatPrecision,
+    TimePrecision,
+    ValueList,
+}
+
+#[derive(Clone, Copy)]
+struct TypeParamSpec {
+    title: &'static str,
+    default_value: &'static str,
+    required: bool,
+    kind: TypeParamKind,
+}
+
 #[derive(Clone)]
 pub struct StructureTab {
     pub root: gtk::Box,
@@ -43,6 +117,7 @@ pub struct StructureTab {
     idx_header_label: gtk::Label,
     add_idx_btn: gtk::Button,
     idx_refresh_btn: gtk::Button,
+    current_engine: Rc<RefCell<DbEngine>>,
     current_db: Rc<RefCell<String>>,
     current_table: Rc<RefCell<String>>,
     columns: Rc<RefCell<Vec<ColumnInfo>>>,
@@ -296,6 +371,7 @@ impl StructureTab {
         paned.set_end_child(Some(&bottom_box));
         root.append(&paned);
 
+        let current_engine = Rc::new(RefCell::new(DbEngine::Postgres));
         let current_db = Rc::new(RefCell::new(String::new()));
         let current_table = Rc::new(RefCell::new(String::new()));
         let columns = Rc::new(RefCell::new(Vec::new()));
@@ -312,6 +388,7 @@ impl StructureTab {
             idx_header_label,
             add_idx_btn: add_idx_btn.clone(),
             idx_refresh_btn: idx_refresh_btn.clone(),
+            current_engine,
             current_db: current_db.clone(),
             current_table: current_table.clone(),
             columns,
@@ -375,6 +452,17 @@ impl StructureTab {
         }
 
         tab
+    }
+
+    pub fn set_engine(&self, engine: DbEngine) {
+        *self.current_engine.borrow_mut() = engine;
+    }
+
+    pub fn column_data_types_for_engine(engine: DbEngine) -> &'static [&'static str] {
+        match engine {
+            DbEngine::MySql => MYSQL_COLUMN_DATA_TYPES,
+            DbEngine::Postgres => POSTGRES_COLUMN_DATA_TYPES,
+        }
     }
 
     pub fn set_structure(
@@ -671,8 +759,225 @@ impl StructureTab {
         }
     }
 
+    fn param_spec_for_type(base_type: &str) -> Option<TypeParamSpec> {
+        match base_type.trim().to_ascii_uppercase().as_str() {
+            "VARCHAR" => Some(TypeParamSpec {
+                title: "Length (e.g. 255)",
+                default_value: "255",
+                required: true,
+                kind: TypeParamKind::Length,
+            }),
+            "CHAR" => Some(TypeParamSpec {
+                title: "Length (e.g. 36)",
+                default_value: "36",
+                required: true,
+                kind: TypeParamKind::Length,
+            }),
+            "VARBINARY" => Some(TypeParamSpec {
+                title: "Byte Length (e.g. 255)",
+                default_value: "255",
+                required: true,
+                kind: TypeParamKind::Length,
+            }),
+            "BINARY" => Some(TypeParamSpec {
+                title: "Byte Length (e.g. 16)",
+                default_value: "16",
+                required: true,
+                kind: TypeParamKind::Length,
+            }),
+            "BIT" => Some(TypeParamSpec {
+                title: "Bit Length (optional, e.g. 1, 8)",
+                default_value: "1",
+                required: false,
+                kind: TypeParamKind::Length,
+            }),
+            "VARBIT" => Some(TypeParamSpec {
+                title: "Bit Length (optional, e.g. 64)",
+                default_value: "64",
+                required: false,
+                kind: TypeParamKind::Length,
+            }),
+            "DECIMAL" => Some(TypeParamSpec {
+                title: "Precision, Scale (e.g. 10,2)",
+                default_value: "10,2",
+                required: false,
+                kind: TypeParamKind::PrecisionScale,
+            }),
+            "NUMERIC" => Some(TypeParamSpec {
+                title: "Precision, Scale (optional, e.g. 10,2)",
+                default_value: "10,2",
+                required: false,
+                kind: TypeParamKind::PrecisionScale,
+            }),
+            "FLOAT" => Some(TypeParamSpec {
+                title: "Precision (optional, e.g. 24)",
+                default_value: "",
+                required: false,
+                kind: TypeParamKind::FloatPrecision,
+            }),
+            "TIME" | "DATETIME" | "TIMESTAMP" | "TIMESTAMPTZ" => Some(TypeParamSpec {
+                title: "Fractional Seconds Precision (optional, 0–6)",
+                default_value: "",
+                required: false,
+                kind: TypeParamKind::TimePrecision,
+            }),
+            "ENUM" => Some(TypeParamSpec {
+                title: "Allowed Values (e.g. 'active', 'pending')",
+                default_value: "'value1', 'value2'",
+                required: true,
+                kind: TypeParamKind::ValueList,
+            }),
+            "SET" => Some(TypeParamSpec {
+                title: "Allowed Values (e.g. 'read', 'write')",
+                default_value: "'value1', 'value2'",
+                required: true,
+                kind: TypeParamKind::ValueList,
+            }),
+            _ => None,
+        }
+    }
+
+    fn parse_column_data_type(raw: &str) -> (&str, Option<String>) {
+        let trimmed = raw.trim();
+        if let Some((prefix_raw, rest)) = trimmed.split_once('(') {
+            let prefix = prefix_raw.trim().to_ascii_lowercase();
+            let (inner_raw, suffix_raw) = rest.rsplit_once(')').unwrap_or((rest, ""));
+            let inner = inner_raw.trim();
+            let suffix = suffix_raw.trim().to_ascii_lowercase();
+            match prefix.as_str() {
+                "varchar" | "character varying" | "nvarchar" => {
+                    return ("VARCHAR", Some(inner.to_string()));
+                }
+                "char" | "character" | "bpchar" | "nchar" => {
+                    return ("CHAR", Some(inner.to_string()));
+                }
+                "varbinary" => {
+                    return ("VARBINARY", Some(inner.to_string()));
+                }
+                "binary" => {
+                    return ("BINARY", Some(inner.to_string()));
+                }
+                "bit" => {
+                    return ("BIT", Some(inner.to_string()));
+                }
+                "varbit" | "bit varying" => {
+                    return ("VARBIT", Some(inner.to_string()));
+                }
+                "decimal" | "dec" => {
+                    return ("DECIMAL", Some(inner.to_string()));
+                }
+                "numeric" => {
+                    return ("NUMERIC", Some(inner.to_string()));
+                }
+                "float" => {
+                    return ("FLOAT", Some(inner.to_string()));
+                }
+                "time" => {
+                    return ("TIME", Some(inner.to_string()));
+                }
+                "datetime" => {
+                    return ("DATETIME", Some(inner.to_string()));
+                }
+                "timestamp" => {
+                    if suffix == "with time zone" {
+                        return ("TIMESTAMPTZ", Some(inner.to_string()));
+                    }
+                    return ("TIMESTAMP", Some(inner.to_string()));
+                }
+                "timestamptz" => {
+                    return ("TIMESTAMPTZ", Some(inner.to_string()));
+                }
+                "enum" => {
+                    return ("ENUM", Some(inner.to_string()));
+                }
+                "set" => {
+                    return ("SET", Some(inner.to_string()));
+                }
+                _ => {}
+            }
+        }
+        match trimmed.to_ascii_lowercase().as_str() {
+            "varchar" | "character varying" | "nvarchar" => ("VARCHAR", Some("255".to_string())),
+            "char" | "character" | "bpchar" | "nchar" => ("CHAR", Some("36".to_string())),
+            "varbinary" => ("VARBINARY", Some("255".to_string())),
+            "binary" => ("BINARY", Some("16".to_string())),
+            "bit" => ("BIT", Some(String::new())),
+            "varbit" | "bit varying" => ("VARBIT", Some(String::new())),
+            "decimal" | "dec" => ("DECIMAL", Some(String::new())),
+            "numeric" => ("NUMERIC", Some(String::new())),
+            "float" => ("FLOAT", Some(String::new())),
+            "time" | "time without time zone" => ("TIME", Some(String::new())),
+            "datetime" => ("DATETIME", Some(String::new())),
+            "timestamp" | "timestamp without time zone" => ("TIMESTAMP", Some(String::new())),
+            "timestamptz" | "timestamp with time zone" => ("TIMESTAMPTZ", Some(String::new())),
+            "int" | "integer" | "int4" | "int(11)" => ("INT", None),
+            "bigint" | "int8" | "bigint(20)" => ("BIGINT", None),
+            "smallint" | "int2" | "smallint(6)" => ("SMALLINT", None),
+            "tinyint" | "tinyint(4)" => ("TINYINT", None),
+            "bool" | "boolean" | "tinyint(1)" => ("BOOLEAN", None),
+            "float4" | "real" => ("REAL", None),
+            "float8" | "double precision" => ("DOUBLE PRECISION", None),
+            _ => (trimmed, None),
+        }
+    }
+
+    fn format_column_data_type(selected_type: &str, raw_param: &str) -> Option<String> {
+        let selected_type = selected_type.trim();
+        if selected_type.is_empty() {
+            return None;
+        }
+        if let Some(spec) = Self::param_spec_for_type(selected_type) {
+            let param = raw_param
+                .trim()
+                .trim_start_matches('(')
+                .trim_end_matches(')')
+                .trim();
+            if param.is_empty() {
+                if spec.required {
+                    return None;
+                } else {
+                    return Some(selected_type.to_string());
+                }
+            }
+            Some(format!("{}({})", selected_type, param))
+        } else {
+            Some(selected_type.to_string())
+        }
+    }
+
+    fn build_column_type_options(
+        engine: DbEngine,
+        existing: Option<&ColumnInfo>,
+    ) -> (Vec<String>, usize, Option<String>) {
+        let mut type_options: Vec<String> = Self::column_data_types_for_engine(engine)
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+
+        let (init_type_idx, parsed_param) = if let Some(col) = existing {
+            let raw_dt = col.data_type.trim();
+            let (canonical, param) = Self::parse_column_data_type(raw_dt);
+            if let Some(pos) = type_options
+                .iter()
+                .position(|t| t.eq_ignore_ascii_case(canonical))
+            {
+                (pos, param)
+            } else if !raw_dt.is_empty() {
+                type_options.insert(0, raw_dt.to_string());
+                (0, None)
+            } else {
+                (0, None)
+            }
+        } else {
+            (0, None)
+        };
+
+        (type_options, init_type_idx, parsed_param)
+    }
+
     fn open_column_dialog(&self, parent: &gtk::Widget, existing: Option<ColumnInfo>) {
         let is_edit = existing.is_some();
+        let engine = *self.current_engine.borrow();
         let dialog = adw::Dialog::builder()
             .title(if is_edit { "Edit Column" } else { "Add Column" })
             .content_width(420)
@@ -698,15 +1003,63 @@ impl StructureTab {
             )
             .build();
 
-        let type_row = adw::EntryRow::builder()
-            .title("Data Type (e.g. VARCHAR(255), INT, TEXT)")
-            .text(
-                existing
-                    .as_ref()
-                    .map(|c| c.data_type.as_str())
-                    .unwrap_or("VARCHAR(255)"),
-            )
+        let (type_options, init_type_idx, parsed_param) =
+            Self::build_column_type_options(engine, existing.as_ref());
+
+        let type_refs: Vec<&str> = type_options.iter().map(|s| s.as_str()).collect();
+        let type_model = gtk::StringList::new(&type_refs);
+        let type_row = adw::ComboRow::builder()
+            .title("Data Type")
+            .model(&type_model)
+            .selected(init_type_idx as u32)
             .build();
+
+        let init_selected_type = &type_options[init_type_idx];
+        let init_spec = Self::param_spec_for_type(init_selected_type);
+        let (init_param_visible, init_param_title, init_param_text) = match init_spec {
+            Some(spec) => (
+                true,
+                spec.title,
+                parsed_param.unwrap_or_else(|| spec.default_value.to_string()),
+            ),
+            None => (false, "Length", String::new()),
+        };
+
+        let type_param_row = adw::EntryRow::builder()
+            .title(init_param_title)
+            .text(&init_param_text)
+            .visible(init_param_visible)
+            .build();
+
+        let last_auto_param = Rc::new(RefCell::new(init_param_text));
+        let last_param_kind = Rc::new(RefCell::new(init_spec.map(|s| s.kind)));
+        {
+            let type_model = type_model.clone();
+            let type_param_row = type_param_row.clone();
+            let last_auto_param = last_auto_param.clone();
+            let last_param_kind = last_param_kind.clone();
+            type_row.connect_selected_notify(move |combo| {
+                let selected_type = type_model
+                    .string(combo.selected())
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                if let Some(spec) = Self::param_spec_for_type(&selected_type) {
+                    type_param_row.set_title(spec.title);
+                    let cur_text = type_param_row.text().trim().to_string();
+                    let prev_auto = last_auto_param.borrow().clone();
+                    let prev_kind = *last_param_kind.borrow();
+                    if cur_text == prev_auto || prev_kind != Some(spec.kind) {
+                        type_param_row.set_text(spec.default_value);
+                        *last_auto_param.borrow_mut() = spec.default_value.to_string();
+                    }
+                    *last_param_kind.borrow_mut() = Some(spec.kind);
+                    type_param_row.set_visible(true);
+                } else {
+                    *last_param_kind.borrow_mut() = None;
+                    type_param_row.set_visible(false);
+                }
+            });
+        }
 
         let nullable_row = adw::SwitchRow::builder()
             .title("Nullable")
@@ -731,6 +1084,7 @@ impl StructureTab {
 
         prefs_group.add(&name_row);
         prefs_group.add(&type_row);
+        prefs_group.add(&type_param_row);
         prefs_group.add(&nullable_row);
         prefs_group.add(&default_row);
         prefs_group.add(&pk_row);
@@ -763,9 +1117,19 @@ impl StructureTab {
             let db = self.current_db.borrow().clone();
             let table = self.current_table.borrow().clone();
             let old_col = existing;
+            let type_model = type_model.clone();
+            let type_param_row = type_param_row.clone();
             save_btn.connect_clicked(move |_| {
                 let col_name = name_row.text().trim().to_string();
-                let data_type = type_row.text().trim().to_string();
+                let selected_type = type_model
+                    .string(type_row.selected())
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default();
+                let Some(data_type) =
+                    Self::format_column_data_type(&selected_type, &type_param_row.text())
+                else {
+                    return;
+                };
                 if col_name.is_empty() || data_type.is_empty() {
                     return;
                 }
@@ -1403,5 +1767,214 @@ impl StructureTab {
         });
 
         alert.present(Some(parent));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_and_format_column_data_types() {
+        assert_eq!(
+            StructureTab::parse_column_data_type("varchar(120)"),
+            ("VARCHAR", Some("120".to_string()))
+        );
+        assert_eq!(
+            StructureTab::parse_column_data_type("character varying(64)"),
+            ("VARCHAR", Some("64".to_string()))
+        );
+        assert_eq!(
+            StructureTab::parse_column_data_type("bpchar(36)"),
+            ("CHAR", Some("36".to_string()))
+        );
+        assert_eq!(
+            StructureTab::parse_column_data_type("char(10)"),
+            ("CHAR", Some("10".to_string()))
+        );
+        assert_eq!(
+            StructureTab::parse_column_data_type("decimal(12, 4)"),
+            ("DECIMAL", Some("12, 4".to_string()))
+        );
+        assert_eq!(
+            StructureTab::parse_column_data_type("numeric(10,2)"),
+            ("NUMERIC", Some("10,2".to_string()))
+        );
+        assert_eq!(
+            StructureTab::parse_column_data_type("numeric"),
+            ("NUMERIC", Some(String::new()))
+        );
+        assert_eq!(
+            StructureTab::parse_column_data_type("varbinary(255)"),
+            ("VARBINARY", Some("255".to_string()))
+        );
+        assert_eq!(
+            StructureTab::parse_column_data_type("binary(16)"),
+            ("BINARY", Some("16".to_string()))
+        );
+        assert_eq!(
+            StructureTab::parse_column_data_type("bit(8)"),
+            ("BIT", Some("8".to_string()))
+        );
+        assert_eq!(
+            StructureTab::parse_column_data_type("bit varying(64)"),
+            ("VARBIT", Some("64".to_string()))
+        );
+        assert_eq!(
+            StructureTab::parse_column_data_type("timestamp(3) with time zone"),
+            ("TIMESTAMPTZ", Some("3".to_string()))
+        );
+        assert_eq!(
+            StructureTab::parse_column_data_type("enum('active','pending')"),
+            ("ENUM", Some("'active','pending'".to_string()))
+        );
+        assert_eq!(
+            StructureTab::parse_column_data_type("set('read','write')"),
+            ("SET", Some("'read','write'".to_string()))
+        );
+        assert_eq!(
+            StructureTab::parse_column_data_type("int4"),
+            ("INT", None)
+        );
+
+        assert_eq!(
+            StructureTab::format_column_data_type("VARCHAR", "255"),
+            Some("VARCHAR(255)".to_string())
+        );
+        assert_eq!(
+            StructureTab::format_column_data_type("CHAR", "36"),
+            Some("CHAR(36)".to_string())
+        );
+        assert_eq!(
+            StructureTab::format_column_data_type("DECIMAL", "10,2"),
+            Some("DECIMAL(10,2)".to_string())
+        );
+        assert_eq!(
+            StructureTab::format_column_data_type("NUMERIC", ""),
+            Some("NUMERIC".to_string())
+        );
+        assert_eq!(
+            StructureTab::format_column_data_type("TIMESTAMP", ""),
+            Some("TIMESTAMP".to_string())
+        );
+        assert_eq!(
+            StructureTab::format_column_data_type("TIMESTAMP", "3"),
+            Some("TIMESTAMP(3)".to_string())
+        );
+        assert_eq!(
+            StructureTab::format_column_data_type("ENUM", "'a', 'b'"),
+            Some("ENUM('a', 'b')".to_string())
+        );
+        assert_eq!(
+            StructureTab::format_column_data_type("ENUM", ""),
+            None
+        );
+        assert_eq!(
+            StructureTab::format_column_data_type("VARCHAR", ""),
+            None
+        );
+        assert_eq!(
+            StructureTab::format_column_data_type("INT", ""),
+            Some("INT".to_string())
+        );
+    }
+
+    #[test]
+    fn test_column_data_types_filtered_by_engine() {
+        let mysql_types = StructureTab::column_data_types_for_engine(DbEngine::MySql);
+        let pg_types = StructureTab::column_data_types_for_engine(DbEngine::Postgres);
+
+        let pg_only = [
+            "SERIAL",
+            "BIGSERIAL",
+            "DOUBLE PRECISION",
+            "TIMESTAMPTZ",
+            "UUID",
+            "JSONB",
+            "VARBIT",
+            "BYTEA",
+        ];
+        for unsupported in pg_only {
+            assert!(
+                !mysql_types.contains(&unsupported),
+                "MySQL dropdown must not list PostgreSQL-only type '{}'",
+                unsupported
+            );
+            assert!(
+                pg_types.contains(&unsupported),
+                "PostgreSQL dropdown should list '{}'",
+                unsupported
+            );
+        }
+
+        let mysql_only = [
+            "MEDIUMTEXT",
+            "LONGTEXT",
+            "TINYINT",
+            "DOUBLE",
+            "DATETIME",
+            "ENUM",
+            "SET",
+            "BINARY",
+            "VARBINARY",
+            "BLOB",
+        ];
+        for unsupported in mysql_only {
+            assert!(
+                !pg_types.contains(&unsupported),
+                "PostgreSQL dropdown must not list MySQL-only type '{}'",
+                unsupported
+            );
+            assert!(
+                mysql_types.contains(&unsupported),
+                "MySQL dropdown should list '{}'",
+                unsupported
+            );
+        }
+
+        // Every listed type for both engines must produce a valid SQL type with its default parameter
+        for &engine in &[DbEngine::MySql, DbEngine::Postgres] {
+            for &ty in StructureTab::column_data_types_for_engine(engine) {
+                let default_param = StructureTab::param_spec_for_type(ty)
+                    .map(|s| s.default_value)
+                    .unwrap_or("");
+                let formatted = StructureTab::format_column_data_type(ty, default_param);
+                assert!(
+                    formatted.as_deref().is_some_and(|s| !s.is_empty()),
+                    "Type '{}' for {:?} failed to format with default param '{}'",
+                    ty,
+                    engine,
+                    default_param
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_column_type_options_per_engine() {
+        let (mysql_opts, mysql_idx, mysql_param) =
+            StructureTab::build_column_type_options(DbEngine::MySql, None);
+        assert_eq!(mysql_idx, 0);
+        assert_eq!(mysql_param, None);
+        assert_eq!(mysql_opts, MYSQL_COLUMN_DATA_TYPES);
+
+        let (pg_opts, pg_idx, pg_param) =
+            StructureTab::build_column_type_options(DbEngine::Postgres, None);
+        assert_eq!(pg_idx, 0);
+        assert_eq!(pg_param, None);
+        assert_eq!(pg_opts, POSTGRES_COLUMN_DATA_TYPES);
+
+        let existing_pg_col = ColumnInfo {
+            ordinal: 1,
+            name: "payload".to_string(),
+            data_type: "jsonb".to_string(),
+            is_nullable: true,
+            is_primary_key: false,
+            default_value: None,
+            extra: String::new(),
+        };
+        let (pg_edit_opts, pg_edit_idx, _) =
+            StructureTab::build_column_type_options(DbEngine::Postgres, Some(&existing_pg_col));
+        assert_eq!(pg_edit_opts[pg_edit_idx], "JSONB");
     }
 }

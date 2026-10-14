@@ -135,6 +135,7 @@ pub fn spawn_db_worker() -> (Sender<BackendCommand>, Receiver<BackendEvent>) {
                                         let _ = evt_tx
                                             .send(BackendEvent::Connected {
                                                 connection_name: profile.bookmark.name.clone(),
+                                                engine: profile.bookmark.engine,
                                                 engine_label,
                                                 databases,
                                                 selected_database,

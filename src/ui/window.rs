@@ -65,12 +65,14 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                 },
                 BackendEvent::Connected {
                     connection_name,
+                    engine,
                     engine_label,
                     databases,
                     selected_database,
                     tables,
                 } => {
                     conn_page.set_busy(false, "");
+                    workspace_content.structure_tab.set_engine(engine);
                     let init_db = selected_database.as_deref();
                     if let Some(db) = init_db {
                         workspace_content.query_tab.set_database(db);
