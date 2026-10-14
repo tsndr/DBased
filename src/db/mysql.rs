@@ -109,16 +109,33 @@ impl MySqlDriver {
 
     fn format_column_spec(spec: &ColumnSpec, include_pk: bool) -> String {
         let mut parts = vec![quote_mysql_ident(&spec.name), spec.data_type.trim().to_string()];
-        if spec.is_nullable {
+        let cleaned_extra: Vec<&str> = spec
+            .extra
+            .as_deref()
+            .unwrap_or("")
+            .split_whitespace()
+            .filter(|tok| {
+                !tok.eq_ignore_ascii_case("DEFAULT_GENERATED")
+                    && !tok.eq_ignore_ascii_case("None")
+            })
+            .collect();
+        let is_auto_increment = cleaned_extra
+            .iter()
+            .any(|tok| tok.eq_ignore_ascii_case("AUTO_INCREMENT"));
+        if spec.is_nullable && !is_auto_increment {
             parts.push("NULL".to_string());
         } else {
             parts.push("NOT NULL".to_string());
         }
         if let Some(def) = &spec.default_value {
             let trimmed = def.trim();
-            if !trimmed.is_empty() {
+            if !trimmed.is_empty() && !is_auto_increment {
                 if trimmed.eq_ignore_ascii_case("NULL")
                     || trimmed.eq_ignore_ascii_case("CURRENT_TIMESTAMP")
+                    || trimmed.eq_ignore_ascii_case("CURRENT_TIMESTAMP()")
+                    || trimmed.eq_ignore_ascii_case("NOW()")
+                    || trimmed.ends_with("()")
+                    || (trimmed.starts_with('(') && trimmed.ends_with(')'))
                     || trimmed.chars().all(|c| c.is_ascii_digit() || c == '.' || c == '-')
                 {
                     parts.push(format!("DEFAULT {}", trimmed));
@@ -129,6 +146,9 @@ impl MySqlDriver {
                     ));
                 }
             }
+        }
+        if !cleaned_extra.is_empty() {
+            parts.push(cleaned_extra.join(" "));
         }
         if include_pk && spec.is_primary_key {
             parts.push("PRIMARY KEY".to_string());
@@ -925,6 +945,35 @@ mod tests {
         assert_eq!(
             MySqlDriver::format_drop_index_clause("idx_users_email", false),
             "DROP INDEX `idx_users_email`"
+        );
+    }
+
+    #[test]
+    fn test_mysql_format_column_spec() {
+        let auto_inc_pk = ColumnSpec {
+            name: "id".to_string(),
+            data_type: "INT".to_string(),
+            is_nullable: false,
+            default_value: None,
+            extra: Some("AUTO_INCREMENT".to_string()),
+            is_primary_key: true,
+        };
+        assert_eq!(
+            MySqlDriver::format_column_spec(&auto_inc_pk, true),
+            "`id` INT NOT NULL AUTO_INCREMENT PRIMARY KEY"
+        );
+
+        let on_update_ts = ColumnSpec {
+            name: "updated_at".to_string(),
+            data_type: "TIMESTAMP".to_string(),
+            is_nullable: false,
+            default_value: Some("CURRENT_TIMESTAMP".to_string()),
+            extra: Some("ON UPDATE CURRENT_TIMESTAMP".to_string()),
+            is_primary_key: false,
+        };
+        assert_eq!(
+            MySqlDriver::format_column_spec(&on_update_ts, false),
+            "`updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
         );
     }
 }

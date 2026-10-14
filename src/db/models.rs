@@ -157,6 +157,7 @@ pub struct ColumnSpec {
     pub data_type: String,
     pub is_nullable: bool,
     pub default_value: Option<String>,
+    pub extra: Option<String>,
     pub is_primary_key: bool,
 }
 
