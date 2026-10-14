@@ -173,10 +173,6 @@ kbd,
   display: flex;
   align-items: center;
   gap: 4px;
-  background: rgba(255, 255, 255, 0.03);
-  padding: 4px;
-  border-radius: 10px;
-  border: 1px solid var(--border-subtle);
 }
 
 .nav-link {
@@ -371,34 +367,6 @@ kbd,
   align-items: center;
   justify-content: center;
   gap: 12px;
-  margin-bottom: 28px;
-}
-
-/* Quick terminal command strip in Hero */
-.hero-quick-cmd {
-  display: inline-flex;
-  align-items: center;
-  gap: 12px;
-  max-width: 100%;
-  background: var(--bg-code);
-  border: 1px solid var(--border-default);
-  border-radius: 10px;
-  padding: 8px 10px 8px 16px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-}
-
-.hero-quick-cmd .cmd-prompt {
-  color: var(--accent-green-bright);
-  font-family: var(--font-mono);
-  font-size: 0.85rem;
-  user-select: none;
-}
-
-.hero-quick-cmd code {
-  font-size: 0.85rem;
-  color: var(--fg-primary);
-  overflow-x: auto;
-  white-space: nowrap;
 }
 
 .copy-icon-btn {
@@ -942,7 +910,7 @@ kbd {
 
 .distro-panel-grid {
   display: grid;
-  grid-template-columns: 1.35fr 1fr;
+  grid-template-columns: 1fr 1.35fr;
   gap: 24px;
   align-items: start;
 }
@@ -1273,10 +1241,5 @@ kbd {
 
   .adw-tab-btn .tab-key {
     display: none;
-  }
-
-  .hero-quick-cmd {
-    max-width: 100%;
-    overflow-x: auto;
   }
 }

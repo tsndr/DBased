@@ -209,23 +209,6 @@
             </svg>
           </a>
         </div>
-
-        <div class="hero-quick-cmd">
-          <span class="cmd-prompt">$</span>
-          <code>git clone https://github.com/tsndr/dbased.git &amp;&amp; cd dbased &amp;&amp; make install-user</code>
-          <button
-            type="button"
-            class="copy-icon-btn"
-            data-copy="git clone https://github.com/tsndr/dbased.git && cd dbased && make install-user"
-            aria-label="Copy build command"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
-            <span class="copy-label">Copy</span>
-          </button>
-        </div>
       </div>
     </section>
 
@@ -572,6 +555,25 @@ Berlin
           <!-- Arch Linux Panel -->
           <div id="distro-arch" class="distro-panel active" role="tabpanel">
             <div class="distro-panel-grid">
+              <div class="distro-info-card">
+                <h4>Arch Linux Package</h4>
+                <p>Built natively with <code>makepkg</code> against system <code>gtk4</code>, <code>libadwaita</code>, and <code>gtksourceview5</code>.</p>
+                <ul class="distro-meta-list">
+                  <li><span>Artifact</span><code>dbased-*-x86_64.pkg.tar.zst</code></li>
+                  <li><span>Architecture</span><code>x86_64, aarch64 (PKGBUILD)</code></li>
+                  <li><span>Runtime Deps</span><code>gtk4, libadwaita, gtksourceview5</code></li>
+                </ul>
+                <a
+                  href="https://github.com/tsndr/dbased/releases/latest"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="btn btn-primary btn-sm"
+                  style="width: 100%"
+                >
+                  Download from GitHub Releases
+                </a>
+              </div>
+
               <div>
                 <div class="cmd-block">
                   <div class="cmd-block-header">
@@ -603,14 +605,19 @@ cd dbased
 make install-arch   # or: makepkg -sfi</code></pre>
                 </div>
               </div>
+            </div>
+          </div>
 
+          <!-- Debian / Ubuntu Panel -->
+          <div id="distro-deb" class="distro-panel" role="tabpanel">
+            <div class="distro-panel-grid">
               <div class="distro-info-card">
-                <h4>Arch Linux Package</h4>
-                <p>Built natively with <code>makepkg</code> against system <code>gtk4</code>, <code>libadwaita</code>, and <code>gtksourceview5</code>.</p>
+                <h4>Debian &amp; Ubuntu (.deb)</h4>
+                <p>Packaged with <code>cargo-deb</code> on Ubuntu 24.04 LTS (GTK 4.14, Libadwaita 1.5) with automatic shared library dependency resolution.</p>
                 <ul class="distro-meta-list">
-                  <li><span>Artifact</span><code>dbased-*-x86_64.pkg.tar.zst</code></li>
-                  <li><span>Architecture</span><code>x86_64, aarch64 (PKGBUILD)</code></li>
-                  <li><span>Runtime Deps</span><code>gtk4, libadwaita, gtksourceview5</code></li>
+                  <li><span>Artifact</span><code>dbased_*_amd64.deb</code></li>
+                  <li><span>Section</span><code>database</code></li>
+                  <li><span>Includes</span><code>Binary, .desktop, SVG Icon, AppStream</code></li>
                 </ul>
                 <a
                   href="https://github.com/tsndr/dbased/releases/latest"
@@ -619,15 +626,10 @@ make install-arch   # or: makepkg -sfi</code></pre>
                   class="btn btn-primary btn-sm"
                   style="width: 100%"
                 >
-                  Download from GitHub Releases
+                  Download .deb from Releases
                 </a>
               </div>
-            </div>
-          </div>
 
-          <!-- Debian / Ubuntu Panel -->
-          <div id="distro-deb" class="distro-panel" role="tabpanel">
-            <div class="distro-panel-grid">
               <div>
                 <div class="cmd-block">
                   <div class="cmd-block-header">
@@ -658,14 +660,19 @@ make install-arch   # or: makepkg -sfi</code></pre>
   libgtk-4-dev libadwaita-1-dev libgtksourceview-5-dev</code></pre>
                 </div>
               </div>
+            </div>
+          </div>
 
+          <!-- Fedora / RHEL Panel -->
+          <div id="distro-rpm" class="distro-panel" role="tabpanel">
+            <div class="distro-panel-grid">
               <div class="distro-info-card">
-                <h4>Debian &amp; Ubuntu (.deb)</h4>
-                <p>Packaged with <code>cargo-deb</code> on Ubuntu 24.04 LTS (GTK 4.14, Libadwaita 1.5) with automatic shared library dependency resolution.</p>
+                <h4>Fedora &amp; RHEL (.rpm)</h4>
+                <p>Built with <code>rpmbuild</code> on Fedora 41 with full desktop launcher, scalable icon, and AppStream metadata integration.</p>
                 <ul class="distro-meta-list">
-                  <li><span>Artifact</span><code>dbased_*_amd64.deb</code></li>
-                  <li><span>Section</span><code>database</code></li>
-                  <li><span>Includes</span><code>Binary, .desktop, SVG Icon, AppStream</code></li>
+                  <li><span>Artifact</span><code>dbased-*-1.x86_64.rpm</code></li>
+                  <li><span>Requires</span><code>gtk4, libadwaita, gtksourceview5</code></li>
+                  <li><span>License</span><code>MIT</code></li>
                 </ul>
                 <a
                   href="https://github.com/tsndr/dbased/releases/latest"
@@ -674,15 +681,10 @@ make install-arch   # or: makepkg -sfi</code></pre>
                   class="btn btn-primary btn-sm"
                   style="width: 100%"
                 >
-                  Download .deb from Releases
+                  Download .rpm from Releases
                 </a>
               </div>
-            </div>
-          </div>
 
-          <!-- Fedora / RHEL Panel -->
-          <div id="distro-rpm" class="distro-panel" role="tabpanel">
-            <div class="distro-panel-grid">
               <div>
                 <div class="cmd-block">
                   <div class="cmd-block-header">
@@ -712,14 +714,19 @@ make install-arch   # or: makepkg -sfi</code></pre>
                   <pre class="cmd-pre"><code>sudo dnf install cargo rust gtk4-devel libadwaita-devel gtksourceview5-devel</code></pre>
                 </div>
               </div>
+            </div>
+          </div>
 
+          <!-- Flatpak Panel -->
+          <div id="distro-flatpak" class="distro-panel" role="tabpanel">
+            <div class="distro-panel-grid">
               <div class="distro-info-card">
-                <h4>Fedora &amp; RHEL (.rpm)</h4>
-                <p>Built with <code>rpmbuild</code> on Fedora 41 with full desktop launcher, scalable icon, and AppStream metadata integration.</p>
+                <h4>Flatpak Bundle</h4>
+                <p>Built against <code>org.gnome.Platform//47</code> with Wayland/X11 sockets, read-only <code>~/.ssh</code> key access, and <code>org.freedesktop.secrets</code> keyring integration.</p>
                 <ul class="distro-meta-list">
-                  <li><span>Artifact</span><code>dbased-*-1.x86_64.rpm</code></li>
-                  <li><span>Requires</span><code>gtk4, libadwaita, gtksourceview5</code></li>
-                  <li><span>License</span><code>MIT</code></li>
+                  <li><span>App ID</span><code>io.github.tsndr.dbased</code></li>
+                  <li><span>Runtime</span><code>org.gnome.Platform // 47</code></li>
+                  <li><span>Manifest</span><code>data/io.github.tsndr.dbased.flatpak.yml</code></li>
                 </ul>
                 <a
                   href="https://github.com/tsndr/dbased/releases/latest"
@@ -728,15 +735,10 @@ make install-arch   # or: makepkg -sfi</code></pre>
                   class="btn btn-primary btn-sm"
                   style="width: 100%"
                 >
-                  Download .rpm from Releases
+                  Download .flatpak from Releases
                 </a>
               </div>
-            </div>
-          </div>
 
-          <!-- Flatpak Panel -->
-          <div id="distro-flatpak" class="distro-panel" role="tabpanel">
-            <div class="distro-panel-grid">
               <div>
                 <div class="cmd-block">
                   <div class="cmd-block-header">
@@ -766,14 +768,19 @@ make install-arch   # or: makepkg -sfi</code></pre>
                   <pre class="cmd-pre"><code>flatpak run io.github.tsndr.dbased</code></pre>
                 </div>
               </div>
+            </div>
+          </div>
 
+          <!-- AppImage & Tarball Panel -->
+          <div id="distro-appimage" class="distro-panel" role="tabpanel">
+            <div class="distro-panel-grid">
               <div class="distro-info-card">
-                <h4>Flatpak Bundle</h4>
-                <p>Built against <code>org.gnome.Platform//47</code> with Wayland/X11 sockets, read-only <code>~/.ssh</code> key access, and <code>org.freedesktop.secrets</code> keyring integration.</p>
+                <h4>Portable Linux Formats</h4>
+                <p>Run DBased anywhere without package manager installation using the self-contained GTK4 AppImage, or install the stripped release binary tarball directly.</p>
                 <ul class="distro-meta-list">
-                  <li><span>App ID</span><code>io.github.tsndr.dbased</code></li>
-                  <li><span>Runtime</span><code>org.gnome.Platform // 47</code></li>
-                  <li><span>Manifest</span><code>data/io.github.tsndr.dbased.flatpak.yml</code></li>
+                  <li><span>AppImage</span><code>dbased-*-x86_64.AppImage</code></li>
+                  <li><span>Tarball</span><code>dbased-*-linux-x86_64.tar.gz</code></li>
+                  <li><span>Checksums</span><code>SHA256SUMS included in release</code></li>
                 </ul>
                 <a
                   href="https://github.com/tsndr/dbased/releases/latest"
@@ -782,15 +789,10 @@ make install-arch   # or: makepkg -sfi</code></pre>
                   class="btn btn-primary btn-sm"
                   style="width: 100%"
                 >
-                  Download .flatpak from Releases
+                  View All Release Assets
                 </a>
               </div>
-            </div>
-          </div>
 
-          <!-- AppImage & Tarball Panel -->
-          <div id="distro-appimage" class="distro-panel" role="tabpanel">
-            <div class="distro-panel-grid">
               <div>
                 <div class="cmd-block">
                   <div class="cmd-block-header">
@@ -820,31 +822,31 @@ make install-arch   # or: makepkg -sfi</code></pre>
                   <pre class="cmd-pre"><code>tar -xzf dbased-*-linux-x86_64.tar.gz &amp;&amp; cd dbased-* &amp;&amp; sudo make install-files</code></pre>
                 </div>
               </div>
-
-              <div class="distro-info-card">
-                <h4>Portable Linux Formats</h4>
-                <p>Run DBased anywhere without package manager installation using the self-contained GTK4 AppImage, or install the stripped release binary tarball directly.</p>
-                <ul class="distro-meta-list">
-                  <li><span>AppImage</span><code>dbased-*-x86_64.AppImage</code></li>
-                  <li><span>Tarball</span><code>dbased-*-linux-x86_64.tar.gz</code></li>
-                  <li><span>Checksums</span><code>SHA256SUMS included in release</code></li>
-                </ul>
-                <a
-                  href="https://github.com/tsndr/dbased/releases/latest"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  class="btn btn-primary btn-sm"
-                  style="width: 100%"
-                >
-                  View All Release Assets
-                </a>
-              </div>
             </div>
           </div>
 
           <!-- Build from Source Panel -->
           <div id="distro-source" class="distro-panel" role="tabpanel">
             <div class="distro-panel-grid">
+              <div class="distro-info-card">
+                <h4>Building from Source</h4>
+                <p>Requires a stable Rust toolchain supporting the <strong>Rust 2024 edition</strong> (<code>rustc &gt;= 1.85</code>) along with GTK 4.14+, Libadwaita 1.5+, and GtkSourceView 5.10+ headers.</p>
+                <ul class="distro-meta-list">
+                  <li><span>Edition</span><code>Rust 2024 (rustc &gt;= 1.85)</code></li>
+                  <li><span>Direct Run</span><code>cargo run --release</code></li>
+                  <li><span>Debug Logs</span><code>RUST_LOG=dbased=debug</code></li>
+                </ul>
+                <a
+                  href="https://github.com/tsndr/dbased"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="btn btn-secondary btn-sm"
+                  style="width: 100%"
+                >
+                  Browse Source Repository
+                </a>
+              </div>
+
               <div>
                 <div class="cmd-block">
                   <div class="cmd-block-header">
@@ -876,25 +878,6 @@ sudo make install</code></pre>
                   </div>
                   <pre class="cmd-pre"><code>make install-user   # Uninstall anytime with: make uninstall-user</code></pre>
                 </div>
-              </div>
-
-              <div class="distro-info-card">
-                <h4>Building from Source</h4>
-                <p>Requires a stable Rust toolchain supporting the <strong>Rust 2024 edition</strong> (<code>rustc &gt;= 1.85</code>) along with GTK 4.14+, Libadwaita 1.5+, and GtkSourceView 5.10+ headers.</p>
-                <ul class="distro-meta-list">
-                  <li><span>Edition</span><code>Rust 2024 (rustc &gt;= 1.85)</code></li>
-                  <li><span>Direct Run</span><code>cargo run --release</code></li>
-                  <li><span>Debug Logs</span><code>RUST_LOG=dbased=debug</code></li>
-                </ul>
-                <a
-                  href="https://github.com/tsndr/dbased"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  class="btn btn-secondary btn-sm"
-                  style="width: 100%"
-                >
-                  Browse Source Repository
-                </a>
               </div>
             </div>
           </div>
