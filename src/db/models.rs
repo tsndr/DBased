@@ -339,6 +339,17 @@ pub enum RawQueryOutcome {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateDatabaseSpec {
+    pub name: String,
+    /// MySQL: CHARACTER SET (e.g. "utf8mb4"); PostgreSQL: ENCODING (e.g. "UTF8")
+    pub charset_or_encoding: Option<String>,
+    /// MySQL: COLLATE (e.g. "utf8mb4_unicode_ci")
+    pub collation: Option<String>,
+    /// PostgreSQL: TEMPLATE (e.g. "template0", "template1")
+    pub template: Option<String>,
+}
+
 /// Commands sent from the GTK4 UI thread to the background Tokio database worker.
 #[derive(Debug, Clone)]
 pub enum BackendCommand {
@@ -348,6 +359,7 @@ pub enum BackendCommand {
     Refresh {
         current_database: Option<String>,
     },
+    CreateDatabase(CreateDatabaseSpec),
     SelectDatabase(String),
     SelectTable {
         database: String,
@@ -427,6 +439,12 @@ pub enum BackendEvent {
         databases: Vec<String>,
         selected_database: Option<String>,
         tables: Vec<TableInfo>,
+    },
+    DatabaseCreated {
+        databases: Vec<String>,
+        selected_database: String,
+        tables: Vec<TableInfo>,
+        toast: String,
     },
     DatabaseSelected {
         database: String,

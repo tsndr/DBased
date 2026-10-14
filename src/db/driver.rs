@@ -5,6 +5,7 @@ use async_trait::async_trait;
 #[async_trait]
 pub trait DatabaseDriver: Send + Sync {
     async fn list_databases(&self) -> Result<Vec<String>>;
+    async fn create_database(&self, spec: &CreateDatabaseSpec) -> Result<()>;
     async fn use_database(&mut self, db_name: &str) -> Result<()>;
     async fn list_tables(&self, db_name: &str) -> Result<Vec<TableInfo>>;
     async fn get_table_structure(&self, db_name: &str, table: &str) -> Result<Vec<ColumnInfo>>;

@@ -79,6 +79,7 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                     }
                     sidebar.set_connection_state(
                         &connection_name,
+                        engine,
                         &engine_label,
                         &databases,
                         init_db,
@@ -110,6 +111,24 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                         selected_database.as_deref(),
                         tables,
                     );
+                }
+                BackendEvent::DatabaseCreated {
+                    databases,
+                    selected_database,
+                    tables,
+                    toast,
+                } => {
+                    workspace_content.content_tab.clear_navigation_history();
+                    workspace_content.query_tab.set_database(&selected_database);
+                    let table_names: Vec<String> =
+                        tables.iter().map(|t| t.name.clone()).collect();
+                    workspace_content.relations_tab.set_all_tables(table_names);
+                    sidebar.set_databases_and_tables(
+                        &databases,
+                        Some(&selected_database),
+                        tables,
+                    );
+                    show_toast(&toast);
                 }
                 BackendEvent::DatabaseSelected { database, tables } => {
                     workspace_content.content_tab.clear_navigation_history();

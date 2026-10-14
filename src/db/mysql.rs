@@ -241,6 +241,33 @@ impl MySqlDriver {
             format!("DROP INDEX {}", quote_mysql_ident(name.trim()))
         }
     }
+
+    fn format_create_database_stmt(spec: &CreateDatabaseSpec) -> Result<String> {
+        let name = spec.name.trim();
+        if name.is_empty() {
+            return Err(anyhow!("Database name cannot be empty"));
+        }
+        let mut parts = vec![format!("CREATE DATABASE {}", quote_mysql_ident(name))];
+        if let Some(charset) = &spec.charset_or_encoding {
+            let cs = charset.trim();
+            if !cs.is_empty() && !cs.eq_ignore_ascii_case("Default") {
+                if !cs.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    return Err(anyhow!("Invalid character set '{}'", cs));
+                }
+                parts.push(format!("DEFAULT CHARACTER SET {}", cs));
+            }
+        }
+        if let Some(collation) = &spec.collation {
+            let col = collation.trim();
+            if !col.is_empty() && !col.eq_ignore_ascii_case("Default") {
+                if !col.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    return Err(anyhow!("Invalid collation '{}'", col));
+                }
+                parts.push(format!("DEFAULT COLLATE {}", col));
+            }
+        }
+        Ok(parts.join(" "))
+    }
 }
 
 fn decode_mysql_cell(row: &MySqlRow, idx: usize) -> DbValue {
@@ -326,6 +353,16 @@ impl DatabaseDriver for MySqlDriver {
             }
         }
         Ok(dbs)
+    }
+
+    async fn create_database(&self, spec: &CreateDatabaseSpec) -> Result<()> {
+        let sql = Self::format_create_database_stmt(spec)?;
+        let pool = self.pool_for_db("").await?;
+        sqlx::raw_sql(&sql)
+            .execute(&pool)
+            .await
+            .with_context(|| format!("Failed to create MySQL database '{}'", spec.name))?;
+        Ok(())
     }
 
     async fn use_database(&mut self, db_name: &str) -> Result<()> {
@@ -990,5 +1027,38 @@ mod tests {
             MySqlDriver::format_column_spec(&on_update_ts, false),
             "`updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
         );
+    }
+
+    #[test]
+    fn test_mysql_create_database_sql_formatting() {
+        let basic = CreateDatabaseSpec {
+            name: "analytics_db".to_string(),
+            charset_or_encoding: None,
+            collation: None,
+            template: None,
+        };
+        assert_eq!(
+            MySqlDriver::format_create_database_stmt(&basic).unwrap(),
+            "CREATE DATABASE `analytics_db`"
+        );
+
+        let with_charset_and_collation = CreateDatabaseSpec {
+            name: "app`db".to_string(),
+            charset_or_encoding: Some("utf8mb4".to_string()),
+            collation: Some("utf8mb4_unicode_ci".to_string()),
+            template: None,
+        };
+        assert_eq!(
+            MySqlDriver::format_create_database_stmt(&with_charset_and_collation).unwrap(),
+            "CREATE DATABASE `app``db` DEFAULT CHARACTER SET utf8mb4 DEFAULT COLLATE utf8mb4_unicode_ci"
+        );
+
+        let empty = CreateDatabaseSpec {
+            name: "   ".to_string(),
+            charset_or_encoding: None,
+            collation: None,
+            template: None,
+        };
+        assert!(MySqlDriver::format_create_database_stmt(&empty).is_err());
     }
 }

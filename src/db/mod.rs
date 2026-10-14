@@ -216,6 +216,47 @@ pub fn spawn_db_worker() -> (Sender<BackendCommand>, Receiver<BackendEvent>) {
                             }
                         }
                     }
+                    BackendCommand::CreateDatabase(spec) => {
+                        if let Some(ref mut sess) = session {
+                            let db_name = spec.name.trim().to_string();
+                            if let Err(e) = sess.driver.create_database(&spec).await {
+                                let _ = evt_tx
+                                    .send(BackendEvent::Error(format!("{:#}", e)))
+                                    .await;
+                                continue;
+                            }
+                            if let Err(e) = sess.driver.use_database(&db_name).await {
+                                let _ = evt_tx
+                                    .send(BackendEvent::Error(format!("{:#}", e)))
+                                    .await;
+                                continue;
+                            }
+                            match sess.driver.list_databases().await {
+                                Ok(databases) => {
+                                    let tables = sess
+                                        .driver
+                                        .list_tables(&db_name)
+                                        .await
+                                        .unwrap_or_default();
+                                    sess.cached_tables =
+                                        tables.iter().map(|t| t.name.clone()).collect();
+                                    let _ = evt_tx
+                                        .send(BackendEvent::DatabaseCreated {
+                                            databases,
+                                            selected_database: db_name.clone(),
+                                            tables,
+                                            toast: format!("Created database '{}'", db_name),
+                                        })
+                                        .await;
+                                }
+                                Err(e) => {
+                                    let _ = evt_tx
+                                        .send(BackendEvent::Error(format!("{:#}", e)))
+                                        .await;
+                                }
+                            }
+                        }
+                    }
                     BackendCommand::SelectDatabase(database) => {
                         if let Some(ref mut sess) = session {
                             if let Err(e) = sess.driver.use_database(&database).await {

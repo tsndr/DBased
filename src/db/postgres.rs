@@ -610,6 +610,44 @@ impl PostgresDriver {
             quote_pg_ident(index_name.trim())
         ))
     }
+
+    fn format_create_database_stmt(spec: &CreateDatabaseSpec) -> Result<String> {
+        let name = spec.name.trim();
+        if name.is_empty() {
+            return Err(anyhow!("Database name cannot be empty"));
+        }
+        let mut opts = Vec::new();
+        if let Some(enc) = &spec.charset_or_encoding {
+            let e = enc.trim();
+            if !e.is_empty() && !e.eq_ignore_ascii_case("Default") {
+                if !e.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    return Err(anyhow!("Invalid encoding '{}'", e));
+                }
+                opts.push(format!(
+                    "ENCODING = {}",
+                    escape_sql_literal(&DbValue::Text(e.to_string()))
+                ));
+            }
+        }
+        if let Some(tpl) = &spec.template {
+            let t = tpl.trim();
+            if !t.is_empty() && !t.eq_ignore_ascii_case("Default") {
+                if !t.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    return Err(anyhow!("Invalid template '{}'", t));
+                }
+                opts.push(format!("TEMPLATE = {}", quote_pg_ident(t)));
+            }
+        }
+        if opts.is_empty() {
+            Ok(format!("CREATE DATABASE {}", quote_pg_ident(name)))
+        } else {
+            Ok(format!(
+                "CREATE DATABASE {} WITH {}",
+                quote_pg_ident(name),
+                opts.join(" ")
+            ))
+        }
+    }
 }
 
 fn decode_pg_cell(row: &PgRow, idx: usize) -> DbValue {
@@ -709,6 +747,16 @@ impl DatabaseDriver for PostgresDriver {
             }
         }
         Ok(dbs)
+    }
+
+    async fn create_database(&self, spec: &CreateDatabaseSpec) -> Result<()> {
+        let sql = Self::format_create_database_stmt(spec)?;
+        let pool = self.pool_for_db("").await?;
+        sqlx::raw_sql(&sql)
+            .execute(&pool)
+            .await
+            .with_context(|| format!("Failed to create PostgreSQL database '{}'", spec.name))?;
+        Ok(())
     }
 
     async fn use_database(&mut self, db_name: &str) -> Result<()> {
@@ -1392,5 +1440,38 @@ mod tests {
              ALTER TABLE \"public\".\"orders\" ALTER COLUMN \"id\" SET NOT NULL;\n\
              ALTER TABLE \"public\".\"orders\" ALTER COLUMN \"id\" DROP IDENTITY IF EXISTS"
         );
+    }
+
+    #[test]
+    fn test_pg_create_database_sql_formatting() {
+        let basic = CreateDatabaseSpec {
+            name: "billing_prod".to_string(),
+            charset_or_encoding: None,
+            collation: None,
+            template: None,
+        };
+        assert_eq!(
+            PostgresDriver::format_create_database_stmt(&basic).unwrap(),
+            "CREATE DATABASE \"billing_prod\""
+        );
+
+        let with_enc_and_template = CreateDatabaseSpec {
+            name: "my\"db".to_string(),
+            charset_or_encoding: Some("UTF8".to_string()),
+            collation: None,
+            template: Some("template0".to_string()),
+        };
+        assert_eq!(
+            PostgresDriver::format_create_database_stmt(&with_enc_and_template).unwrap(),
+            "CREATE DATABASE \"my\"\"db\" WITH ENCODING = 'UTF8' TEMPLATE = \"template0\""
+        );
+
+        let empty = CreateDatabaseSpec {
+            name: " ".to_string(),
+            charset_or_encoding: None,
+            collation: None,
+            template: None,
+        };
+        assert!(PostgresDriver::format_create_database_stmt(&empty).is_err());
     }
 }

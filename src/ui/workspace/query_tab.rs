@@ -913,6 +913,7 @@ mod tests {
         ];
         sidebar.set_connection_state(
             "Production Store (SSH)",
+            crate::config::bookmarks::DbEngine::Postgres,
             "PostgreSQL (via SSH)",
             &["commerce_prod".to_string()],
             Some("commerce_prod"),
