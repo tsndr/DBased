@@ -8,6 +8,7 @@ BINDIR       := $(PREFIX)/bin
 DATADIR      := $(PREFIX)/share
 APPDIR       := $(DATADIR)/applications
 ICONDIR      := $(DATADIR)/icons/hicolor/scalable/apps
+METAINFODIR  := $(DATADIR)/metainfo
 
 .PHONY: all build install install-files uninstall install-user uninstall-user arch-pkg install-arch clean
 
@@ -20,6 +21,7 @@ install-files:
 	install -Dm755 target/release/$(APP_NAME) "$(DESTDIR)$(BINDIR)/$(APP_NAME)"
 	install -Dm644 data/$(APP_ID).desktop "$(DESTDIR)$(APPDIR)/$(APP_ID).desktop"
 	install -Dm644 data/$(APP_ID).svg "$(DESTDIR)$(ICONDIR)/$(APP_ID).svg"
+	install -Dm644 data/$(APP_ID).metainfo.xml "$(DESTDIR)$(METAINFODIR)/$(APP_ID).metainfo.xml"
 
 install: build install-files
 	@if [ -z "$(DESTDIR)" ]; then \
@@ -31,6 +33,7 @@ uninstall:
 	rm -f "$(DESTDIR)$(BINDIR)/$(APP_NAME)"
 	rm -f "$(DESTDIR)$(APPDIR)/$(APP_ID).desktop"
 	rm -f "$(DESTDIR)$(ICONDIR)/$(APP_ID).svg"
+	rm -f "$(DESTDIR)$(METAINFODIR)/$(APP_ID).metainfo.xml"
 	@if [ -z "$(DESTDIR)" ]; then \
 		gtk-update-icon-cache -q -t -f "$(DATADIR)/icons/hicolor" 2>/dev/null || true; \
 		update-desktop-database -q "$(APPDIR)" 2>/dev/null || true; \

@@ -76,7 +76,18 @@ Write and run ad-hoc SQL queries with syntax highlighting, Vim motions, executio
 
 ## Installation
 
-### System Dependencies
+### Prebuilt Packages (GitHub Releases)
+
+Download the latest package for your distribution from [GitHub Releases](https://github.com/tsndr/dbased/releases):
+
+- **Arch Linux (`.pkg.tar.zst`)**: `sudo pacman -U dbased-*-x86_64.pkg.tar.zst`
+- **Debian / Ubuntu (`.deb`)**: `sudo apt install ./dbased_*_amd64.deb`
+- **Fedora / RHEL (`.rpm`)**: `sudo dnf install ./dbased-*.x86_64.rpm`
+- **Flatpak (`.flatpak`)**: `flatpak install --user ./dbased-*-x86_64.flatpak`
+- **AppImage (`.AppImage`)**: `chmod +x dbased-*-x86_64.AppImage && ./dbased-*-x86_64.AppImage`
+- **Generic Linux (`.tar.gz`)**: `tar -xzf dbased-*-linux-x86_64.tar.gz && cd dbased-* && sudo make install-files`
+
+### System Dependencies (Building from Source)
 
 Before building from source, ensure the GTK4, Libadwaita, and GtkSourceView 5 development libraries and a Rust toolchain (`stable`, supporting Rust 2024 edition / `rustc >= 1.85`) are installed:
 

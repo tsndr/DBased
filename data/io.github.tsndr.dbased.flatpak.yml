@@ -1,0 +1,32 @@
+id: io.github.tsndr.dbased
+runtime: org.gnome.Platform
+runtime-version: '47'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: dbased
+
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --device=dri
+  - --filesystem=~/.ssh:ro
+  - --talk-name=org.freedesktop.secrets
+
+modules:
+  - name: dbased
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      build-args:
+        - --share=network
+      env:
+        CARGO_HOME: /run/build/dbased/cargo
+    build-commands:
+      - cargo build --release --locked
+      - make PREFIX=/app install-files
+    sources:
+      - type: dir
+        path: ..

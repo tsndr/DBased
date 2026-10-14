@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.tsndr.dbased</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>DBased</name>
+  <summary>Clean Libadwaita GUI Database Client for MySQL and PostgreSQL</summary>
+  <developer id="io.github.tsndr">
+    <name>toby</name>
+  </developer>
+  <description>
+    <p>
+      DBased is a lightweight, native Linux GUI database client built with Rust, GTK4, Libadwaita, and GtkSourceView 5.
+      Designed around a clean GNOME aesthetic and keyboard-centric workflows, it combines a responsive spreadsheet data grid,
+      schema and foreign-key management, built-in SSH bastion tunneling, and Vim-enabled editors for both SQL queries and
+      multiline JSON/JSONB/text cells.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.tsndr.dbased.desktop</launchable>
+  <url type="homepage">https://github.com/tsndr/dbased</url>
+  <url type="bugtracker">https://github.com/tsndr/dbased/issues</url>
+  <url type="vcs-browser">https://github.com/tsndr/dbased</url>
+  <content_rating type="oars-1.1" />
+  <branding>
+    <color type="primary" scheme_preference="light">#3584e4</color>
+    <color type="primary" scheme_preference="dark">#1c71d8</color>
+  </branding>
+  <releases>
+    <release version="0.1.0" date="2026-10-14" />
+  </releases>
+</component>

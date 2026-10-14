@@ -1,0 +1,328 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version tag for dry-run builds (e.g. v0.1.0)'
+        required: false
+        default: 'v0.1.0'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  APP_ID: io.github.tsndr.dbased
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Debian / Ubuntu (.deb), Generic Linux (.tar.gz), and AppImage (.AppImage)
+  #    Built in Ubuntu 24.04 LTS (glibc 2.39, GTK 4.14, Libadwaita 1.5)
+  # ---------------------------------------------------------------------------
+  build-deb-tarball-appimage:
+    name: Build .deb, .tar.gz & .AppImage (x86_64)
+    runs-on: ubuntu-24.04
+    container:
+      image: ubuntu:24.04
+    steps:
+      - name: Install system dependencies
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential \
+            ca-certificates \
+            curl \
+            desktop-file-utils \
+            dpkg-dev \
+            file \
+            git \
+            gsettings-desktop-schemas \
+            libadwaita-1-dev \
+            libgdk-pixbuf2.0-bin \
+            libglib2.0-bin \
+            libgtk-4-dev \
+            libgtksourceview-5-dev \
+            librsvg2-common \
+            librsvg2-dev \
+            patchelf \
+            pkg-config \
+            wget \
+            xz-utils
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Determine release version
+        id: version
+        run: |
+          RAW_TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${RAW_TAG#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          sed -i "0,/^version = \".*\"/s//version = \"${VERSION}\"/" Cargo.toml
+          cargo metadata --format-version 1 >/dev/null
+
+      - name: Cache Cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ubuntu-24.04-x86_64
+
+      - name: Install cargo-deb
+        uses: taiki-e/install-action@cargo-deb
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package Debian (.deb)
+        run: |
+          mkdir -p dist
+          cargo deb --no-build --output "dist/dbased_${{ steps.version.outputs.version }}-1_amd64.deb"
+
+      - name: Package Generic Linux Tarball (.tar.gz)
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          STAGE_DIR="dbased-${VERSION}-linux-x86_64"
+          mkdir -p "${STAGE_DIR}/data" dist
+          install -Dm755 target/release/dbased "${STAGE_DIR}/dbased"
+          strip -s "${STAGE_DIR}/dbased"
+          install -Dm644 Makefile "${STAGE_DIR}/Makefile"
+          install -Dm644 README.md "${STAGE_DIR}/README.md"
+          install -Dm644 data/${APP_ID}.desktop "${STAGE_DIR}/data/${APP_ID}.desktop"
+          install -Dm644 data/${APP_ID}.svg "${STAGE_DIR}/data/${APP_ID}.svg"
+          install -Dm644 data/${APP_ID}.metainfo.xml "${STAGE_DIR}/data/${APP_ID}.metainfo.xml"
+          tar -czf "dist/${STAGE_DIR}.tar.gz" "${STAGE_DIR}"
+          rm -rf "${STAGE_DIR}"
+
+      - name: Package AppImage (.AppImage)
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          rm -rf AppDir
+          make PREFIX=/usr DESTDIR="$PWD/AppDir" install-files
+
+          curl -fsSL -o linuxdeploy-x86_64.AppImage \
+            https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          curl -fsSL -o linuxdeploy-plugin-gtk.sh \
+            https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh
+          chmod +x linuxdeploy-x86_64.AppImage linuxdeploy-plugin-gtk.sh
+
+          export APPIMAGE_EXTRACT_AND_RUN=1
+          export DEPLOY_GTK_VERSION=4
+          export ARCH=x86_64
+          export LINUXDEPLOY_OUTPUT_VERSION="${VERSION}"
+          export OUTPUT="dist/dbased-${VERSION}-x86_64.AppImage"
+
+          ./linuxdeploy-x86_64.AppImage \
+            --appdir AppDir \
+            --executable AppDir/usr/bin/dbased \
+            --desktop-file "data/${APP_ID}.desktop" \
+            --icon-file "data/${APP_ID}.svg" \
+            --plugin gtk \
+            --output appimage
+
+      - name: Upload Ubuntu/Generic artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-deb-tarball-appimage
+          path: dist/*
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 2. Fedora / RHEL (.rpm)
+  #    Built in Fedora 41 container
+  # ---------------------------------------------------------------------------
+  build-rpm:
+    name: Build .rpm (x86_64)
+    runs-on: ubuntu-24.04
+    container:
+      image: fedora:41
+    steps:
+      - name: Install system dependencies
+        run: |
+          dnf install -y \
+            ca-certificates \
+            curl \
+            gcc \
+            git \
+            gtk4-devel \
+            gtksourceview5-devel \
+            libadwaita-devel \
+            make \
+            pkgconf-pkg-config \
+            rpm-build \
+            tar \
+            gzip
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Determine release version
+        id: version
+        run: |
+          RAW_TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${RAW_TAG#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          sed -i "0,/^version = \".*\"/s//version = \"${VERSION}\"/" Cargo.toml
+          cargo metadata --format-version 1 >/dev/null
+
+      - name: Cache Cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: fedora-41-x86_64
+
+      - name: Install cargo-generate-rpm
+        uses: taiki-e/install-action@cargo-generate-rpm
+
+      - name: Build release binary & package RPM
+        run: |
+          cargo build --release --locked
+          strip -s target/release/dbased
+          mkdir -p dist
+          cargo generate-rpm -o "dist/dbased-${{ steps.version.outputs.version }}-1.x86_64.rpm"
+
+      - name: Upload RPM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-rpm
+          path: dist/*.rpm
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 3. Arch Linux (.pkg.tar.zst)
+  #    Built natively with makepkg and PKGBUILD in archlinux:latest
+  # ---------------------------------------------------------------------------
+  build-arch:
+    name: Build Arch .pkg.tar.zst (x86_64)
+    runs-on: ubuntu-24.04
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Install system dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            base-devel \
+            git \
+            gtk4 \
+            gtksourceview5 \
+            libadwaita \
+            rust
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Determine release version & build Arch package
+        run: |
+          RAW_TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${RAW_TAG#v}"
+          sed -i "0,/^version = \".*\"/s//version = \"${VERSION}\"/" Cargo.toml
+          sed -i "s/^pkgver=.*/pkgver=${VERSION}/" PKGBUILD
+          cargo metadata --format-version 1 >/dev/null
+
+          useradd -m builder
+          chown -R builder:builder "$PWD"
+          su builder -c "makepkg -sf --noconfirm"
+
+          mkdir -p dist
+          cp -v dbased-"${VERSION}"-*.pkg.tar.zst dist/
+
+      - name: Upload Arch artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-arch
+          path: dist/*.pkg.tar.zst
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 4. Flatpak Single-File Bundle (.flatpak)
+  #    Built against org.gnome.Platform//47 + rust-stable SDK extension
+  # ---------------------------------------------------------------------------
+  build-flatpak:
+    name: Build .flatpak Bundle (x86_64)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Determine release version
+        id: version
+        run: |
+          RAW_TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${RAW_TAG#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          sed -i "0,/^version = \".*\"/s//version = \"${VERSION}\"/" Cargo.toml
+          cargo metadata --format-version 1 >/dev/null
+
+      - name: Install Flatpak & GNOME 47 SDK
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder appstream
+          sudo flatpak remote-add --if-not-exists --system flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          sudo flatpak install --system -y flathub \
+            org.gnome.Platform//47 \
+            org.gnome.Sdk//47 \
+            org.freedesktop.Sdk.Extension.rust-stable//24.08
+
+      - name: Build Flatpak repository & export bundle
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          mkdir -p dist
+          flatpak-builder \
+            --repo=flatpak-repo \
+            --force-clean \
+            --system \
+            flatpak-build-dir \
+            data/${APP_ID}.flatpak.yml
+          flatpak build-bundle \
+            flatpak-repo \
+            "dist/dbased-${VERSION}-x86_64.flatpak" \
+            "${APP_ID}"
+
+      - name: Upload Flatpak artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-flatpak
+          path: dist/*.flatpak
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 5. Publish GitHub Release
+  # ---------------------------------------------------------------------------
+  release:
+    name: Create GitHub Release
+    needs:
+      - build-deb-tarball-appimage
+      - build-rpm
+      - build-arch
+      - build-flatpak
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: dist/*
