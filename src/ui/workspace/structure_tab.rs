@@ -2,32 +2,40 @@ use crate::config::bookmarks::DbEngine;
 use crate::db::models::{
     BackendCommand, ColumnAlterOp, ColumnInfo, ColumnSpec, IndexAlterOp, IndexInfo, IndexSpec,
 };
-use crate::ui::workspace::{build_resizable_header_cell, wrap_resizable_row_cell};
+use crate::ui::workspace::{
+    CELL_EXTRA_PADDING, DEFAULT_DATA_COL_WIDTH, HEADER_EXTRA_PADDING, MIN_COLUMN_WIDTH,
+    build_resizable_header_cell, compute_auto_column_widths, create_spreadsheet_label_cell,
+    measure_single_line_text,
+};
 use adw::prelude::*;
 use async_channel::Sender;
 use gtk4 as gtk;
 use libadwaita as adw;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 
-const STRUCTURE_HEADERS: &[(&str, i32)] = &[
-    ("#", 68),
-    ("COLUMN NAME", 200),
-    ("DATA TYPE", 160),
-    ("NULLABLE", 95),
-    ("KEY", 75),
-    ("DEFAULT", 145),
-    ("EXTRA", 140),
-    ("ACTIONS", 96),
+const DEFAULT_STRUCTURE_INDEX_COL_WIDTH: i32 = 64;
+const DEFAULT_INDEXES_INDEX_COL_WIDTH: i32 = 48;
+const DEFAULT_ACTIONS_COL_WIDTH: i32 = 84;
+
+const STRUCTURE_HEADERS: &[&str] = &[
+    "Column Name",
+    "Data Type",
+    "Nullable",
+    "Key",
+    "Default",
+    "Extra",
+    "Actions",
 ];
 
-const INDEX_HEADERS: &[(&str, i32)] = &[
-    ("KEY NAME", 220),
-    ("TYPE", 120),
-    ("COLUMNS", 260),
-    ("UNIQUE", 95),
-    ("METHOD", 110),
-    ("ACTIONS", 96),
+const INDEX_HEADERS: &[&str] = &[
+    "Key Name",
+    "Type",
+    "Columns",
+    "Unique",
+    "Method",
+    "Actions",
 ];
 
 const INDEX_TYPES: &[&str] = &["INDEX", "UNIQUE", "PRIMARY", "FULLTEXT", "SPATIAL"];
@@ -109,11 +117,13 @@ struct TypeParamSpec {
 #[derive(Clone)]
 pub struct StructureTab {
     pub root: gtk::Box,
-    list_box: gtk::ListBox,
+    scroll: gtk::ScrolledWindow,
+    pub(crate) grid: gtk::Grid,
     header_label: gtk::Label,
     add_btn: gtk::Button,
     refresh_btn: gtk::Button,
-    idx_list_box: gtk::ListBox,
+    idx_scroll: gtk::ScrolledWindow,
+    pub(crate) idx_grid: gtk::Grid,
     idx_header_label: gtk::Label,
     add_idx_btn: gtk::Button,
     idx_refresh_btn: gtk::Button,
@@ -122,10 +132,16 @@ pub struct StructureTab {
     current_table: Rc<RefCell<String>>,
     columns: Rc<RefCell<Vec<ColumnInfo>>>,
     indexes: Rc<RefCell<Vec<IndexInfo>>>,
-    col_widths: Rc<RefCell<Vec<i32>>>,
-    row_cells: Rc<RefCell<Vec<Vec<gtk::Box>>>>,
-    idx_col_widths: Rc<RefCell<Vec<i32>>>,
-    idx_row_cells: Rc<RefCell<Vec<Vec<gtk::Box>>>>,
+    col_widths: Rc<RefCell<HashMap<usize, i32>>>,
+    natural_col_widths: Rc<RefCell<Vec<i32>>>,
+    header_cells: Rc<RefCell<Vec<(usize, gtk::Box)>>>,
+    last_viewport_width: Rc<RefCell<i32>>,
+    index_col_width: Rc<RefCell<i32>>,
+    idx_col_widths: Rc<RefCell<HashMap<usize, i32>>>,
+    idx_natural_col_widths: Rc<RefCell<Vec<i32>>>,
+    idx_header_cells: Rc<RefCell<Vec<(usize, gtk::Box)>>>,
+    idx_last_viewport_width: Rc<RefCell<i32>>,
+    idx_index_col_width: Rc<RefCell<i32>>,
     dragged_from_idx: Rc<RefCell<Option<usize>>>,
     cmd_tx: Sender<BackendCommand>,
 }
@@ -154,10 +170,10 @@ impl StructureTab {
 
         // Top toolbar
         let bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        bar.set_margin_top(10);
-        bar.set_margin_bottom(10);
-        bar.set_margin_start(16);
-        bar.set_margin_end(16);
+        bar.set_margin_top(8);
+        bar.set_margin_bottom(8);
+        bar.set_margin_start(12);
+        bar.set_margin_end(12);
 
         let header_label = gtk::Label::new(Some("Select a table to inspect its columns"));
         header_label.add_css_class("heading");
@@ -184,77 +200,21 @@ impl StructureTab {
         top_box.append(&bar);
         top_box.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
 
-        let initial_widths: Vec<i32> = STRUCTURE_HEADERS.iter().map(|(_, w)| *w).collect();
-        let col_widths = Rc::new(RefCell::new(initial_widths));
-        let row_cells: Rc<RefCell<Vec<Vec<gtk::Box>>>> = Rc::new(RefCell::new(Vec::new()));
-
-        // Column header row
-        let col_header = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        col_header.set_margin_top(8);
-        col_header.set_margin_bottom(8);
-        col_header.set_margin_start(16);
-        col_header.set_margin_end(16);
-
-        for (col_idx, (title, init_w)) in STRUCTURE_HEADERS.iter().enumerate() {
-            let lbl = gtk::Label::new(Some(title));
-            lbl.add_css_class("caption-heading");
-            lbl.add_css_class("dim-label");
-            lbl.set_halign(gtk::Align::Fill);
-            lbl.set_xalign(0.0);
-            lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            lbl.set_max_width_chars(1);
-            lbl.set_margin_start(8);
-            lbl.set_margin_end(4);
-
-            let col_widths_ref = col_widths.clone();
-            let row_cells_ref = row_cells.clone();
-            let hdr_cell = build_resizable_header_cell(
-                &lbl,
-                *init_w,
-                Some("table-header-cell"),
-                move |new_w| {
-                    if let Some(w) = col_widths_ref.borrow_mut().get_mut(col_idx) {
-                        *w = new_w;
-                    }
-                    for row in row_cells_ref.borrow().iter() {
-                        if let Some(cell) = row.get(col_idx) {
-                            cell.set_width_request(new_w);
-                        }
-                    }
-                },
-            );
-            col_header.append(&hdr_cell);
-        }
-
-        let list_box = gtk::ListBox::new();
-        list_box.set_selection_mode(gtk::SelectionMode::None);
-        list_box.add_css_class("boxed-list");
-        list_box.add_css_class("resizable-boxed-list");
-        list_box.set_halign(gtk::Align::Start);
-        list_box.set_margin_top(12);
-        list_box.set_margin_bottom(16);
-        list_box.set_margin_start(16);
-        list_box.set_margin_end(16);
+        let grid = gtk::Grid::new();
+        grid.add_css_class("spreadsheet-grid");
+        grid.set_row_spacing(0);
+        grid.set_column_spacing(0);
+        grid.set_halign(gtk::Align::Start);
+        grid.set_valign(gtk::Align::Start);
 
         let scroll = gtk::ScrolledWindow::builder()
             .vexpand(true)
             .hexpand(true)
             .hscrollbar_policy(gtk::PolicyType::Automatic)
             .vscrollbar_policy(gtk::PolicyType::Automatic)
-            .child(&list_box)
+            .child(&grid)
             .build();
 
-        let header_scroll = gtk::ScrolledWindow::builder()
-            .hexpand(true)
-            .vexpand(false)
-            .hscrollbar_policy(gtk::PolicyType::External)
-            .vscrollbar_policy(gtk::PolicyType::Never)
-            .hadjustment(&scroll.hadjustment())
-            .child(&col_header)
-            .build();
-
-        top_box.append(&header_scroll);
-        top_box.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         top_box.append(&scroll);
 
         // ==========================================
@@ -267,8 +227,8 @@ impl StructureTab {
         let idx_bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         idx_bar.set_margin_top(8);
         idx_bar.set_margin_bottom(8);
-        idx_bar.set_margin_start(16);
-        idx_bar.set_margin_end(16);
+        idx_bar.set_margin_start(12);
+        idx_bar.set_margin_end(12);
 
         let idx_header_label = gtk::Label::new(Some("Indexes"));
         idx_header_label.add_css_class("heading");
@@ -295,76 +255,21 @@ impl StructureTab {
         bottom_box.append(&idx_bar);
         bottom_box.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
 
-        let init_idx_widths: Vec<i32> = INDEX_HEADERS.iter().map(|(_, w)| *w).collect();
-        let idx_col_widths = Rc::new(RefCell::new(init_idx_widths));
-        let idx_row_cells: Rc<RefCell<Vec<Vec<gtk::Box>>>> = Rc::new(RefCell::new(Vec::new()));
-
-        let idx_col_header = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        idx_col_header.set_margin_top(8);
-        idx_col_header.set_margin_bottom(8);
-        idx_col_header.set_margin_start(16);
-        idx_col_header.set_margin_end(16);
-
-        for (col_idx, (title, init_w)) in INDEX_HEADERS.iter().enumerate() {
-            let lbl = gtk::Label::new(Some(title));
-            lbl.add_css_class("caption-heading");
-            lbl.add_css_class("dim-label");
-            lbl.set_halign(gtk::Align::Fill);
-            lbl.set_xalign(0.0);
-            lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            lbl.set_max_width_chars(1);
-            lbl.set_margin_start(8);
-            lbl.set_margin_end(4);
-
-            let idx_col_widths_ref = idx_col_widths.clone();
-            let idx_row_cells_ref = idx_row_cells.clone();
-            let hdr_cell = build_resizable_header_cell(
-                &lbl,
-                *init_w,
-                Some("table-header-cell"),
-                move |new_w| {
-                    if let Some(w) = idx_col_widths_ref.borrow_mut().get_mut(col_idx) {
-                        *w = new_w;
-                    }
-                    for row in idx_row_cells_ref.borrow().iter() {
-                        if let Some(cell) = row.get(col_idx) {
-                            cell.set_width_request(new_w);
-                        }
-                    }
-                },
-            );
-            idx_col_header.append(&hdr_cell);
-        }
-
-        let idx_list_box = gtk::ListBox::new();
-        idx_list_box.set_selection_mode(gtk::SelectionMode::None);
-        idx_list_box.add_css_class("boxed-list");
-        idx_list_box.add_css_class("resizable-boxed-list");
-        idx_list_box.set_halign(gtk::Align::Start);
-        idx_list_box.set_margin_top(12);
-        idx_list_box.set_margin_bottom(16);
-        idx_list_box.set_margin_start(16);
-        idx_list_box.set_margin_end(16);
+        let idx_grid = gtk::Grid::new();
+        idx_grid.add_css_class("spreadsheet-grid");
+        idx_grid.set_row_spacing(0);
+        idx_grid.set_column_spacing(0);
+        idx_grid.set_halign(gtk::Align::Start);
+        idx_grid.set_valign(gtk::Align::Start);
 
         let idx_scroll = gtk::ScrolledWindow::builder()
             .vexpand(true)
             .hexpand(true)
             .hscrollbar_policy(gtk::PolicyType::Automatic)
             .vscrollbar_policy(gtk::PolicyType::Automatic)
-            .child(&idx_list_box)
+            .child(&idx_grid)
             .build();
 
-        let idx_header_scroll = gtk::ScrolledWindow::builder()
-            .hexpand(true)
-            .vexpand(false)
-            .hscrollbar_policy(gtk::PolicyType::External)
-            .vscrollbar_policy(gtk::PolicyType::Never)
-            .hadjustment(&idx_scroll.hadjustment())
-            .child(&idx_col_header)
-            .build();
-
-        bottom_box.append(&idx_header_scroll);
-        bottom_box.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         bottom_box.append(&idx_scroll);
 
         paned.set_start_child(Some(&top_box));
@@ -380,11 +285,13 @@ impl StructureTab {
 
         let tab = Self {
             root,
-            list_box,
+            scroll: scroll.clone(),
+            grid,
             header_label,
             add_btn: add_btn.clone(),
             refresh_btn: refresh_btn.clone(),
-            idx_list_box,
+            idx_scroll: idx_scroll.clone(),
+            idx_grid,
             idx_header_label,
             add_idx_btn: add_idx_btn.clone(),
             idx_refresh_btn: idx_refresh_btn.clone(),
@@ -393,13 +300,57 @@ impl StructureTab {
             current_table: current_table.clone(),
             columns,
             indexes,
-            col_widths,
-            row_cells,
-            idx_col_widths,
-            idx_row_cells,
+            col_widths: Rc::new(RefCell::new(HashMap::new())),
+            natural_col_widths: Rc::new(RefCell::new(Vec::new())),
+            header_cells: Rc::new(RefCell::new(Vec::new())),
+            last_viewport_width: Rc::new(RefCell::new(0)),
+            index_col_width: Rc::new(RefCell::new(DEFAULT_STRUCTURE_INDEX_COL_WIDTH)),
+            idx_col_widths: Rc::new(RefCell::new(HashMap::new())),
+            idx_natural_col_widths: Rc::new(RefCell::new(Vec::new())),
+            idx_header_cells: Rc::new(RefCell::new(Vec::new())),
+            idx_last_viewport_width: Rc::new(RefCell::new(0)),
+            idx_index_col_width: Rc::new(RefCell::new(DEFAULT_INDEXES_INDEX_COL_WIDTH)),
             dragged_from_idx,
             cmd_tx: cmd_tx.clone(),
         };
+
+        // Recompute auto column widths when the viewport width changes
+        {
+            let tab_clone = tab.clone();
+            scroll.hadjustment().connect_page_size_notify(move |_| {
+                let tab_for_idle = tab_clone.clone();
+                gtk::glib::idle_add_local_once(move || {
+                    tab_for_idle.reapply_column_widths_if_viewport_changed();
+                });
+            });
+        }
+        {
+            let tab_clone = tab.clone();
+            scroll.connect_map(move |_| {
+                let tab_for_idle = tab_clone.clone();
+                gtk::glib::idle_add_local_once(move || {
+                    tab_for_idle.reapply_column_widths_if_viewport_changed();
+                });
+            });
+        }
+        {
+            let tab_clone = tab.clone();
+            idx_scroll.hadjustment().connect_page_size_notify(move |_| {
+                let tab_for_idle = tab_clone.clone();
+                gtk::glib::idle_add_local_once(move || {
+                    tab_for_idle.reapply_idx_column_widths_if_viewport_changed();
+                });
+            });
+        }
+        {
+            let tab_clone = tab.clone();
+            idx_scroll.connect_map(move |_| {
+                let tab_for_idle = tab_clone.clone();
+                gtk::glib::idle_add_local_once(move || {
+                    tab_for_idle.reapply_idx_column_widths_if_viewport_changed();
+                });
+            });
+        }
 
         // Refresh button (top)
         {
@@ -451,6 +402,9 @@ impl StructureTab {
             });
         }
 
+        tab.render_rows();
+        tab.render_indexes();
+
         tab
     }
 
@@ -472,6 +426,12 @@ impl StructureTab {
         cols: Vec<ColumnInfo>,
         idxs: Vec<IndexInfo>,
     ) {
+        let table_changed = *self.current_db.borrow() != database
+            || *self.current_table.borrow() != table;
+        if table_changed {
+            self.col_widths.borrow_mut().clear();
+            self.idx_col_widths.borrow_mut().clear();
+        }
         *self.current_db.borrow_mut() = database.to_string();
         *self.current_table.borrow_mut() = table.to_string();
         *self.columns.borrow_mut() = cols;
@@ -480,32 +440,215 @@ impl StructureTab {
         self.render_indexes();
     }
 
+    fn available_viewport_width(&self, scroll: &gtk::ScrolledWindow) -> i32 {
+        let hadj_w = scroll.hadjustment().page_size().round() as i32;
+        if hadj_w > 0 {
+            return hadj_w;
+        }
+        let scroll_w = scroll.width();
+        if scroll_w > 0 {
+            return scroll_w;
+        }
+        let root_w = self.root.width();
+        if root_w > 0 {
+            return root_w;
+        }
+        if let Some(win) = self
+            .root
+            .root()
+            .and_then(|r| r.downcast::<gtk::Window>().ok())
+        {
+            let win_w = win.width();
+            if win_w > 280 {
+                return win_w - 280;
+            }
+        }
+        960
+    }
+
+    fn reapply_column_widths_if_viewport_changed(&self) {
+        let viewport_w = self.available_viewport_width(&self.scroll);
+        if viewport_w != *self.last_viewport_width.borrow() {
+            self.apply_column_widths();
+        }
+    }
+
+    fn apply_column_widths(&self) {
+        let viewport_w = self.available_viewport_width(&self.scroll);
+        *self.last_viewport_width.borrow_mut() = viewport_w;
+
+        let header_cells = self.header_cells.borrow();
+        let natural_widths = self.natural_col_widths.borrow();
+        if header_cells.is_empty() || header_cells.len() != natural_widths.len() {
+            return;
+        }
+
+        let actions_col_idx = STRUCTURE_HEADERS.len().saturating_sub(1);
+        let manual_map = self.col_widths.borrow();
+        let manual_overrides: Vec<Option<i32>> = header_cells
+            .iter()
+            .map(|(col_idx, _)| {
+                if let Some(&w) = manual_map.get(col_idx) {
+                    Some(w)
+                } else if *col_idx == actions_col_idx {
+                    Some(DEFAULT_ACTIONS_COL_WIDTH)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let idx_w = *self.index_col_width.borrow();
+        let total_avail = (viewport_w - idx_w - 2).max(0);
+        let widths = compute_auto_column_widths(&natural_widths, &manual_overrides, total_avail);
+
+        for ((_, hdr_cell), target_w) in header_cells.iter().zip(widths) {
+            if hdr_cell.width_request() != target_w {
+                hdr_cell.set_width_request(target_w);
+            }
+        }
+    }
+
+    fn reapply_idx_column_widths_if_viewport_changed(&self) {
+        let viewport_w = self.available_viewport_width(&self.idx_scroll);
+        if viewport_w != *self.idx_last_viewport_width.borrow() {
+            self.apply_idx_column_widths();
+        }
+    }
+
+    fn apply_idx_column_widths(&self) {
+        let viewport_w = self.available_viewport_width(&self.idx_scroll);
+        *self.idx_last_viewport_width.borrow_mut() = viewport_w;
+
+        let header_cells = self.idx_header_cells.borrow();
+        let natural_widths = self.idx_natural_col_widths.borrow();
+        if header_cells.is_empty() || header_cells.len() != natural_widths.len() {
+            return;
+        }
+
+        let actions_col_idx = INDEX_HEADERS.len().saturating_sub(1);
+        let manual_map = self.idx_col_widths.borrow();
+        let manual_overrides: Vec<Option<i32>> = header_cells
+            .iter()
+            .map(|(col_idx, _)| {
+                if let Some(&w) = manual_map.get(col_idx) {
+                    Some(w)
+                } else if *col_idx == actions_col_idx {
+                    Some(DEFAULT_ACTIONS_COL_WIDTH)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let idx_w = *self.idx_index_col_width.borrow();
+        let total_avail = (viewport_w - idx_w - 2).max(0);
+        let widths = compute_auto_column_widths(&natural_widths, &manual_overrides, total_avail);
+
+        for ((_, hdr_cell), target_w) in header_cells.iter().zip(widths) {
+            if hdr_cell.width_request() != target_w {
+                hdr_cell.set_width_request(target_w);
+            }
+        }
+    }
+
     fn render_rows(&self) {
         let table = self.current_table.borrow().clone();
         let cols = self.columns.borrow().clone();
 
-        self.header_label.set_text(&format!(
-            "Table '{}' — {} column(s)",
-            table,
-            cols.len()
-        ));
+        if table.is_empty() {
+            self.header_label
+                .set_text("Select a table to inspect its columns");
+        } else {
+            self.header_label.set_text(&format!(
+                "Table '{}' — {} column(s)",
+                table,
+                cols.len()
+            ));
+        }
         self.add_btn.set_sensitive(!table.is_empty());
         self.refresh_btn.set_sensitive(!table.is_empty());
 
-        while let Some(child) = self.list_box.first_child() {
-            self.list_box.remove(&child);
+        while let Some(child) = self.grid.first_child() {
+            self.grid.remove(&child);
         }
-        self.row_cells.borrow_mut().clear();
+        self.header_cells.borrow_mut().clear();
+        self.natural_col_widths.borrow_mut().clear();
 
-        let widths = self.col_widths.borrow().clone();
+        // Header row (grid row 0)
+        let corner_lbl = gtk::Label::new(Some("#"));
+        corner_lbl.add_css_class("dim-label");
+        corner_lbl.set_halign(gtk::Align::Fill);
+        corner_lbl.set_xalign(0.5);
+        corner_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        corner_lbl.set_max_width_chars(1);
+        corner_lbl.set_margin_top(6);
+        corner_lbl.set_margin_bottom(6);
+
+        let idx_width = *self.index_col_width.borrow();
+        let idx_width_ref = self.index_col_width.clone();
+        let corner_cell = build_resizable_header_cell(
+            &corner_lbl,
+            idx_width,
+            Some("spreadsheet-header-box"),
+            move |new_w| {
+                *idx_width_ref.borrow_mut() = new_w;
+            },
+        );
+        self.grid.attach(&corner_cell, 0, 0, 1, 1);
+
+        let mut header_labels: Vec<(gtk::Label, &'static str)> =
+            Vec::with_capacity(STRUCTURE_HEADERS.len());
+
+        for (col_idx, &title) in STRUCTURE_HEADERS.iter().enumerate() {
+            let hdr_lbl = gtk::Label::new(Some(title));
+            hdr_lbl.add_css_class("heading");
+            hdr_lbl.set_halign(gtk::Align::Fill);
+            hdr_lbl.set_xalign(0.0);
+            hdr_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            hdr_lbl.set_max_width_chars(1);
+            hdr_lbl.set_margin_top(6);
+            hdr_lbl.set_margin_bottom(6);
+            hdr_lbl.set_margin_start(10);
+            hdr_lbl.set_margin_end(6);
+            hdr_lbl.set_tooltip_text(Some(title));
+
+            let col_w = self
+                .col_widths
+                .borrow()
+                .get(&col_idx)
+                .copied()
+                .unwrap_or(if col_idx + 1 == STRUCTURE_HEADERS.len() {
+                    DEFAULT_ACTIONS_COL_WIDTH
+                } else {
+                    DEFAULT_DATA_COL_WIDTH
+                });
+            let col_widths_ref = self.col_widths.clone();
+            let hdr_cell = build_resizable_header_cell(
+                &hdr_lbl,
+                col_w,
+                Some("spreadsheet-header-box"),
+                move |new_w| {
+                    col_widths_ref.borrow_mut().insert(col_idx, new_w);
+                },
+            );
+
+            self.grid.attach(&hdr_cell, (col_idx + 1) as i32, 0, 1, 1);
+            header_labels.push((hdr_lbl, title));
+            self.header_cells.borrow_mut().push((col_idx, hdr_cell));
+        }
+
+        let mut sample_lbl: Option<gtk::Label> = None;
+        let mut widest_texts: Vec<String> = vec![String::new(); STRUCTURE_HEADERS.len()];
 
         for (row_idx, col) in cols.into_iter().enumerate() {
-            let row_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-            row_box.set_margin_top(8);
-            row_box.set_margin_bottom(8);
+            let grid_row = (row_idx + 1) as i32;
 
             // Column 0: Drag handle + ordinal
-            let ord_inner = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            let ord_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            ord_box.add_css_class("spreadsheet-row-num");
+            ord_box.set_overflow(gtk::Overflow::Hidden);
+
             let drag_icon = gtk::Image::from_icon_name("list-drag-handle-symbolic");
             drag_icon.add_css_class("structure-drag-handle");
             drag_icon.set_cursor_from_name(Some("grab"));
@@ -513,6 +656,7 @@ impl StructureTab {
 
             let ord_lbl = gtk::Label::new(Some(&(row_idx + 1).to_string()));
             ord_lbl.add_css_class("dim-label");
+            ord_lbl.add_css_class("caption");
             ord_lbl.add_css_class("monospace");
             ord_lbl.set_halign(gtk::Align::Start);
             ord_lbl.set_xalign(0.0);
@@ -520,109 +664,111 @@ impl StructureTab {
             ord_lbl.set_max_width_chars(1);
             ord_lbl.set_hexpand(true);
 
-            ord_inner.append(&drag_icon);
-            ord_inner.append(&ord_lbl);
+            ord_box.append(&drag_icon);
+            ord_box.append(&ord_lbl);
+            self.grid.attach(&ord_box, 0, grid_row, 1, 1);
 
-            let name_lbl = gtk::Label::new(Some(&col.name));
-            name_lbl.add_css_class("heading");
-            name_lbl.set_halign(gtk::Align::Fill);
-            name_lbl.set_xalign(0.0);
-            name_lbl.set_hexpand(true);
-            name_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            name_lbl.set_max_width_chars(1);
-            name_lbl.set_tooltip_text(Some(&col.name));
+            let (name_cell, name_lbl) =
+                create_spreadsheet_label_cell(&col.name, &[], Some(&col.name));
+            if sample_lbl.is_none() {
+                sample_lbl = Some(name_lbl);
+            }
 
-            let type_lbl = gtk::Label::new(Some(&col.data_type));
-            type_lbl.add_css_class("monospace");
-            type_lbl.set_halign(gtk::Align::Fill);
-            type_lbl.set_xalign(0.0);
-            type_lbl.set_hexpand(true);
-            type_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            type_lbl.set_max_width_chars(1);
-            type_lbl.set_tooltip_text(Some(&col.data_type));
+            let (type_cell, _) =
+                create_spreadsheet_label_cell(&col.data_type, &[], Some(&col.data_type));
 
-            let null_lbl = gtk::Label::new(Some(if col.is_nullable { "YES" } else { "NO" }));
-            if !col.is_nullable {
-                null_lbl.add_css_class("warning");
+            let null_text = if col.is_nullable { "YES" } else { "NO" };
+            let null_classes: &[&str] = if col.is_nullable {
+                &["dim-label"]
             } else {
-                null_lbl.add_css_class("dim-label");
-            }
-            null_lbl.set_halign(gtk::Align::Fill);
-            null_lbl.set_xalign(0.0);
-            null_lbl.set_hexpand(true);
-            null_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            null_lbl.set_max_width_chars(1);
+                &["warning"]
+            };
+            let (null_cell, _) = create_spreadsheet_label_cell(null_text, null_classes, None);
 
-            let key_lbl = gtk::Label::new(Some(if col.is_primary_key { "PRI" } else { "" }));
-            if col.is_primary_key {
-                key_lbl.add_css_class("accent");
-                key_lbl.add_css_class("heading");
-            }
-            key_lbl.set_halign(gtk::Align::Fill);
-            key_lbl.set_xalign(0.0);
-            key_lbl.set_hexpand(true);
-            key_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            key_lbl.set_max_width_chars(1);
+            let key_text = if col.is_primary_key { "PRI" } else { "" };
+            let key_classes: &[&str] = if col.is_primary_key {
+                &["accent", "heading"]
+            } else {
+                &[]
+            };
+            let (key_cell, _) = create_spreadsheet_label_cell(key_text, key_classes, None);
 
             let def_text = col.default_value.as_deref().unwrap_or("NULL");
-            let def_lbl = gtk::Label::new(Some(def_text));
-            def_lbl.add_css_class("monospace");
-            if col.default_value.is_none() {
-                def_lbl.add_css_class("dim-label");
-            }
-            def_lbl.set_halign(gtk::Align::Fill);
-            def_lbl.set_xalign(0.0);
-            def_lbl.set_hexpand(true);
-            def_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            def_lbl.set_max_width_chars(1);
-            def_lbl.set_tooltip_text(Some(def_text));
+            let def_classes: &[&str] = if col.default_value.is_none() {
+                &["cell-null"]
+            } else {
+                &[]
+            };
+            let (def_cell, _) =
+                create_spreadsheet_label_cell(def_text, def_classes, Some(def_text));
 
-            let extra_lbl = gtk::Label::new(Some(&col.extra));
-            extra_lbl.add_css_class("dim-label");
-            extra_lbl.set_halign(gtk::Align::Fill);
-            extra_lbl.set_xalign(0.0);
-            extra_lbl.set_hexpand(true);
-            extra_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            extra_lbl.set_max_width_chars(1);
-            if !col.extra.is_empty() {
-                extra_lbl.set_tooltip_text(Some(&col.extra));
+            let (extra_cell, _) = create_spreadsheet_label_cell(
+                &col.extra,
+                &["dim-label"],
+                if col.extra.is_empty() {
+                    None
+                } else {
+                    Some(&col.extra)
+                },
+            );
+
+            let row_texts = [
+                col.name.as_str(),
+                col.data_type.as_str(),
+                null_text,
+                key_text,
+                def_text,
+                col.extra.as_str(),
+            ];
+            for (i, txt) in row_texts.iter().enumerate() {
+                if txt.chars().count() > widest_texts[i].chars().count() {
+                    widest_texts[i] = (*txt).to_string();
+                }
             }
 
-            let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            let actions_cell = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+            actions_cell.add_css_class("spreadsheet-cell");
+            actions_cell.set_overflow(gtk::Overflow::Hidden);
 
             let edit_btn = gtk::Button::from_icon_name("document-edit-symbolic");
             edit_btn.add_css_class("flat");
+            edit_btn.add_css_class("cell-action-btn");
+            edit_btn.set_valign(gtk::Align::Center);
+            edit_btn.set_margin_start(6);
             edit_btn.set_tooltip_text(Some("Edit Column"));
 
             let del_btn = gtk::Button::from_icon_name("user-trash-symbolic");
             del_btn.add_css_class("flat");
             del_btn.add_css_class("error");
+            del_btn.add_css_class("cell-action-btn");
+            del_btn.set_valign(gtk::Align::Center);
             del_btn.set_tooltip_text(Some("Drop Column"));
 
-            actions.append(&edit_btn);
-            actions.append(&del_btn);
+            actions_cell.append(&edit_btn);
+            actions_cell.append(&del_btn);
 
-            let cells = vec![
-                wrap_resizable_row_cell(&ord_inner, widths[0]),
-                wrap_resizable_row_cell(&name_lbl, widths[1]),
-                wrap_resizable_row_cell(&type_lbl, widths[2]),
-                wrap_resizable_row_cell(&null_lbl, widths[3]),
-                wrap_resizable_row_cell(&key_lbl, widths[4]),
-                wrap_resizable_row_cell(&def_lbl, widths[5]),
-                wrap_resizable_row_cell(&extra_lbl, widths[6]),
-                wrap_resizable_row_cell(&actions, widths[7]),
+            let data_cells = [
+                name_cell,
+                type_cell,
+                null_cell,
+                key_cell,
+                def_cell,
+                extra_cell,
+                actions_cell,
             ];
-
-            for cell in &cells {
-                row_box.append(cell);
+            for (col_idx, cell) in data_cells.iter().enumerate() {
+                self.grid.attach(cell, (col_idx + 1) as i32, grid_row, 1, 1);
             }
-            self.row_cells.borrow_mut().push(cells);
 
-            let row = gtk::ListBoxRow::new();
-            row.set_child(Some(&row_box));
-            self.list_box.append(&row);
+            let mut all_row_cells = Vec::with_capacity(1 + data_cells.len());
+            all_row_cells.push(ord_box);
+            all_row_cells.extend(data_cells);
+            let all_row_cells_rc = Rc::new(all_row_cells);
 
-            // DragSource for reordering database columns
+            // DragSource for reordering database columns (attached to non-action cells)
+            for cell in all_row_cells_rc
+                .iter()
+                .take(all_row_cells_rc.len().saturating_sub(1))
             {
                 let drag_source = gtk::DragSource::builder()
                     .actions(gtk::gdk::DragAction::MOVE)
@@ -636,56 +782,67 @@ impl StructureTab {
                     ))
                 });
 
-                let row_for_begin = row.clone();
+                let row_cells_begin = all_row_cells_rc.clone();
+                let cell_for_icon = cell.clone();
                 drag_source.connect_drag_begin(move |source, _| {
-                    row_for_begin.add_css_class("structure-row-dragging");
-                    let paintable = gtk::WidgetPaintable::new(Some(&row_for_begin));
+                    for c in row_cells_begin.iter() {
+                        c.add_css_class("structure-row-dragging");
+                    }
+                    let paintable = gtk::WidgetPaintable::new(Some(&cell_for_icon));
                     source.set_icon(Some(&paintable), 16, 16);
                 });
 
-                let row_for_end = row.clone();
+                let row_cells_end = all_row_cells_rc.clone();
                 let dragged_from_end = self.dragged_from_idx.clone();
                 drag_source.connect_drag_end(move |_, _, _| {
-                    row_for_end.remove_css_class("structure-row-dragging");
+                    for c in row_cells_end.iter() {
+                        c.remove_css_class("structure-row-dragging");
+                    }
                     *dragged_from_end.borrow_mut() = None;
                 });
 
-                row.add_controller(drag_source);
+                cell.add_controller(drag_source);
             }
 
-            // DropTarget for receiving reordered column
-            {
+            // DropTarget for receiving reordered column across all cells of the row
+            for cell in all_row_cells_rc.iter() {
                 let drop_target = gtk::DropTarget::new(
                     gtk::glib::types::Type::U32,
                     gtk::gdk::DragAction::MOVE,
                 );
 
-                let row_for_enter = row.clone();
+                let row_cells_enter = all_row_cells_rc.clone();
                 let dragged_from_enter = self.dragged_from_idx.clone();
                 drop_target.connect_enter(move |_, _, _| {
                     if let Some(from) = *dragged_from_enter.borrow() {
-                        if from > row_idx {
-                            row_for_enter.add_css_class("structure-drop-above");
-                            row_for_enter.remove_css_class("structure-drop-below");
-                        } else if from < row_idx {
-                            row_for_enter.add_css_class("structure-drop-below");
-                            row_for_enter.remove_css_class("structure-drop-above");
+                        for c in row_cells_enter.iter() {
+                            if from > row_idx {
+                                c.add_css_class("structure-drop-above");
+                                c.remove_css_class("structure-drop-below");
+                            } else if from < row_idx {
+                                c.add_css_class("structure-drop-below");
+                                c.remove_css_class("structure-drop-above");
+                            }
                         }
                     }
                     gtk::gdk::DragAction::MOVE
                 });
 
-                let row_for_leave = row.clone();
+                let row_cells_leave = all_row_cells_rc.clone();
                 drop_target.connect_leave(move |_| {
-                    row_for_leave.remove_css_class("structure-drop-above");
-                    row_for_leave.remove_css_class("structure-drop-below");
+                    for c in row_cells_leave.iter() {
+                        c.remove_css_class("structure-drop-above");
+                        c.remove_css_class("structure-drop-below");
+                    }
                 });
 
                 let tab_clone = self.clone();
-                let row_for_drop = row.clone();
+                let row_cells_drop = all_row_cells_rc.clone();
                 drop_target.connect_drop(move |_, val, _, _| {
-                    row_for_drop.remove_css_class("structure-drop-above");
-                    row_for_drop.remove_css_class("structure-drop-below");
+                    for c in row_cells_drop.iter() {
+                        c.remove_css_class("structure-drop-above");
+                        c.remove_css_class("structure-drop-below");
+                    }
                     if let Ok(from_u32) = val.get::<u32>() {
                         let from_idx = from_u32 as usize;
                         if from_idx != row_idx {
@@ -696,7 +853,7 @@ impl StructureTab {
                     false
                 });
 
-                row.add_controller(drop_target);
+                cell.add_controller(drop_target);
             }
 
             // Edit column handler
@@ -720,6 +877,33 @@ impl StructureTab {
                 });
             }
         }
+
+        // Compute natural full-content width for each column
+        let mut natural_widths = Vec::with_capacity(STRUCTURE_HEADERS.len());
+        for (col_idx, (hdr_lbl, hdr_text)) in header_labels.iter().enumerate() {
+            let hdr_w = measure_single_line_text(hdr_lbl, hdr_text) + HEADER_EXTRA_PADDING;
+            if col_idx + 1 == STRUCTURE_HEADERS.len() {
+                natural_widths.push(hdr_w.max(DEFAULT_ACTIONS_COL_WIDTH));
+            } else {
+                let sample = &widest_texts[col_idx];
+                let cell_w = if sample.is_empty() {
+                    0
+                } else if let Some(ref lbl) = sample_lbl {
+                    measure_single_line_text(lbl, sample) + CELL_EXTRA_PADDING
+                } else {
+                    measure_single_line_text(hdr_lbl, sample) + CELL_EXTRA_PADDING
+                };
+                natural_widths.push(hdr_w.max(cell_w).max(MIN_COLUMN_WIDTH));
+            }
+        }
+
+        *self.natural_col_widths.borrow_mut() = natural_widths;
+        self.apply_column_widths();
+
+        let tab_for_idle = self.clone();
+        gtk::glib::idle_add_local_once(move || {
+            tab_for_idle.reapply_column_widths_if_viewport_changed();
+        });
     }
 
     fn reorder_column(&self, from_idx: usize, to_idx: usize) {
@@ -1214,120 +1398,181 @@ impl StructureTab {
             .set_sensitive(!table.is_empty() && !cols.is_empty());
         self.idx_refresh_btn.set_sensitive(!table.is_empty());
 
-        while let Some(child) = self.idx_list_box.first_child() {
-            self.idx_list_box.remove(&child);
+        while let Some(child) = self.idx_grid.first_child() {
+            self.idx_grid.remove(&child);
         }
-        self.idx_row_cells.borrow_mut().clear();
+        self.idx_header_cells.borrow_mut().clear();
+        self.idx_natural_col_widths.borrow_mut().clear();
 
-        if indexes.is_empty() {
-            if !table.is_empty() {
-                let empty_row = adw::ActionRow::builder()
-                    .title("No indexes defined on this table")
-                    .subtitle("Click 'Add Index' to create a single-column or composite index")
-                    .build();
-                self.idx_list_box.append(&empty_row);
+        // Header row (grid row 0)
+        let corner_lbl = gtk::Label::new(Some("#"));
+        corner_lbl.add_css_class("dim-label");
+        corner_lbl.set_halign(gtk::Align::Fill);
+        corner_lbl.set_xalign(0.5);
+        corner_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        corner_lbl.set_max_width_chars(1);
+        corner_lbl.set_margin_top(6);
+        corner_lbl.set_margin_bottom(6);
+
+        let idx_width = *self.idx_index_col_width.borrow();
+        let idx_width_ref = self.idx_index_col_width.clone();
+        let corner_cell = build_resizable_header_cell(
+            &corner_lbl,
+            idx_width,
+            Some("spreadsheet-header-box"),
+            move |new_w| {
+                *idx_width_ref.borrow_mut() = new_w;
+            },
+        );
+        self.idx_grid.attach(&corner_cell, 0, 0, 1, 1);
+
+        let mut header_labels: Vec<(gtk::Label, &'static str)> =
+            Vec::with_capacity(INDEX_HEADERS.len());
+
+        for (col_idx, &title) in INDEX_HEADERS.iter().enumerate() {
+            let hdr_lbl = gtk::Label::new(Some(title));
+            hdr_lbl.add_css_class("heading");
+            hdr_lbl.set_halign(gtk::Align::Fill);
+            hdr_lbl.set_xalign(0.0);
+            hdr_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            hdr_lbl.set_max_width_chars(1);
+            hdr_lbl.set_margin_top(6);
+            hdr_lbl.set_margin_bottom(6);
+            hdr_lbl.set_margin_start(10);
+            hdr_lbl.set_margin_end(6);
+            hdr_lbl.set_tooltip_text(Some(title));
+
+            let col_w = self
+                .idx_col_widths
+                .borrow()
+                .get(&col_idx)
+                .copied()
+                .unwrap_or(if col_idx + 1 == INDEX_HEADERS.len() {
+                    DEFAULT_ACTIONS_COL_WIDTH
+                } else {
+                    DEFAULT_DATA_COL_WIDTH
+                });
+            let idx_col_widths_ref = self.idx_col_widths.clone();
+            let hdr_cell = build_resizable_header_cell(
+                &hdr_lbl,
+                col_w,
+                Some("spreadsheet-header-box"),
+                move |new_w| {
+                    idx_col_widths_ref.borrow_mut().insert(col_idx, new_w);
+                },
+            );
+
+            self.idx_grid.attach(&hdr_cell, (col_idx + 1) as i32, 0, 1, 1);
+            header_labels.push((hdr_lbl, title));
+            self.idx_header_cells
+                .borrow_mut()
+                .push((col_idx, hdr_cell));
+        }
+
+        let mut sample_lbl: Option<gtk::Label> = None;
+        let mut widest_texts: Vec<String> = vec![String::new(); INDEX_HEADERS.len()];
+
+        for (row_idx, idx) in indexes.into_iter().enumerate() {
+            let grid_row = (row_idx + 1) as i32;
+
+            let num_lbl = gtk::Label::new(Some(&(row_idx + 1).to_string()));
+            num_lbl.add_css_class("spreadsheet-row-num");
+            num_lbl.add_css_class("monospace");
+            num_lbl.add_css_class("caption");
+            num_lbl.add_css_class("dim-label");
+            num_lbl.set_halign(gtk::Align::Fill);
+            num_lbl.set_xalign(0.5);
+            num_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            num_lbl.set_max_width_chars(1);
+            self.idx_grid.attach(&num_lbl, 0, grid_row, 1, 1);
+
+            let (name_cell, name_lbl) =
+                create_spreadsheet_label_cell(&idx.name, &[], Some(&idx.name));
+            if sample_lbl.is_none() {
+                sample_lbl = Some(name_lbl);
             }
-            return;
-        }
 
-        let widths = self.idx_col_widths.borrow().clone();
-
-        for idx in indexes {
-            let row_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-            row_box.set_margin_top(8);
-            row_box.set_margin_bottom(8);
-
-            let name_lbl = gtk::Label::new(Some(&idx.name));
-            name_lbl.add_css_class("heading");
-            name_lbl.set_halign(gtk::Align::Fill);
-            name_lbl.set_xalign(0.0);
-            name_lbl.set_hexpand(true);
-            name_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            name_lbl.set_max_width_chars(1);
-            name_lbl.set_tooltip_text(Some(&idx.name));
-
-            let type_lbl = gtk::Label::new(Some(&idx.index_type));
-            type_lbl.add_css_class("monospace");
-            if idx.is_primary {
-                type_lbl.add_css_class("accent");
-                type_lbl.add_css_class("heading");
+            let type_classes: &[&str] = if idx.is_primary {
+                &["accent", "heading"]
             } else if idx.is_unique {
-                type_lbl.add_css_class("accent");
+                &["accent"]
             } else {
-                type_lbl.add_css_class("dim-label");
-            }
-            type_lbl.set_halign(gtk::Align::Fill);
-            type_lbl.set_xalign(0.0);
-            type_lbl.set_hexpand(true);
-            type_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            type_lbl.set_max_width_chars(1);
-            type_lbl.set_tooltip_text(Some(&idx.index_type));
+                &["dim-label"]
+            };
+            let (type_cell, _) = create_spreadsheet_label_cell(
+                &idx.index_type,
+                type_classes,
+                Some(&idx.index_type),
+            );
 
             let cols_text = idx.columns.join(", ");
-            let cols_lbl = gtk::Label::new(Some(&cols_text));
-            cols_lbl.add_css_class("monospace");
-            cols_lbl.set_halign(gtk::Align::Fill);
-            cols_lbl.set_xalign(0.0);
-            cols_lbl.set_hexpand(true);
-            cols_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            cols_lbl.set_max_width_chars(1);
-            cols_lbl.set_tooltip_text(Some(&cols_text));
+            let (cols_cell, _) =
+                create_spreadsheet_label_cell(&cols_text, &[], Some(&cols_text));
 
-            let uniq_lbl = gtk::Label::new(Some(if idx.is_unique { "YES" } else { "NO" }));
-            if idx.is_unique {
-                uniq_lbl.add_css_class("accent");
+            let uniq_text = if idx.is_unique { "YES" } else { "NO" };
+            let uniq_classes: &[&str] = if idx.is_unique {
+                &["accent"]
             } else {
-                uniq_lbl.add_css_class("dim-label");
-            }
-            uniq_lbl.set_halign(gtk::Align::Fill);
-            uniq_lbl.set_xalign(0.0);
-            uniq_lbl.set_hexpand(true);
-            uniq_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            uniq_lbl.set_max_width_chars(1);
+                &["dim-label"]
+            };
+            let (uniq_cell, _) = create_spreadsheet_label_cell(uniq_text, uniq_classes, None);
 
-            let method_lbl = gtk::Label::new(Some(&idx.method));
-            method_lbl.add_css_class("monospace");
-            method_lbl.add_css_class("dim-label");
-            method_lbl.set_halign(gtk::Align::Fill);
-            method_lbl.set_xalign(0.0);
-            method_lbl.set_hexpand(true);
-            method_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            method_lbl.set_max_width_chars(1);
-            if !idx.method.is_empty() {
-                method_lbl.set_tooltip_text(Some(&idx.method));
+            let (method_cell, _) = create_spreadsheet_label_cell(
+                &idx.method,
+                &["dim-label"],
+                if idx.method.is_empty() {
+                    None
+                } else {
+                    Some(&idx.method)
+                },
+            );
+
+            let row_texts = [
+                idx.name.as_str(),
+                idx.index_type.as_str(),
+                cols_text.as_str(),
+                uniq_text,
+                idx.method.as_str(),
+            ];
+            for (i, txt) in row_texts.iter().enumerate() {
+                if txt.chars().count() > widest_texts[i].chars().count() {
+                    widest_texts[i] = (*txt).to_string();
+                }
             }
 
-            let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            let actions_cell = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+            actions_cell.add_css_class("spreadsheet-cell");
+            actions_cell.set_overflow(gtk::Overflow::Hidden);
 
             let edit_btn = gtk::Button::from_icon_name("document-edit-symbolic");
             edit_btn.add_css_class("flat");
+            edit_btn.add_css_class("cell-action-btn");
+            edit_btn.set_valign(gtk::Align::Center);
+            edit_btn.set_margin_start(6);
             edit_btn.set_tooltip_text(Some("Edit Index"));
 
             let del_btn = gtk::Button::from_icon_name("user-trash-symbolic");
             del_btn.add_css_class("flat");
             del_btn.add_css_class("error");
+            del_btn.add_css_class("cell-action-btn");
+            del_btn.set_valign(gtk::Align::Center);
             del_btn.set_tooltip_text(Some("Drop Index"));
 
-            actions.append(&edit_btn);
-            actions.append(&del_btn);
+            actions_cell.append(&edit_btn);
+            actions_cell.append(&del_btn);
 
-            let cells = vec![
-                wrap_resizable_row_cell(&name_lbl, widths[0]),
-                wrap_resizable_row_cell(&type_lbl, widths[1]),
-                wrap_resizable_row_cell(&cols_lbl, widths[2]),
-                wrap_resizable_row_cell(&uniq_lbl, widths[3]),
-                wrap_resizable_row_cell(&method_lbl, widths[4]),
-                wrap_resizable_row_cell(&actions, widths[5]),
+            let data_cells = [
+                name_cell,
+                type_cell,
+                cols_cell,
+                uniq_cell,
+                method_cell,
+                actions_cell,
             ];
-
-            for cell in &cells {
-                row_box.append(cell);
+            for (col_idx, cell) in data_cells.iter().enumerate() {
+                self.idx_grid
+                    .attach(cell, (col_idx + 1) as i32, grid_row, 1, 1);
             }
-            self.idx_row_cells.borrow_mut().push(cells);
-
-            let row = gtk::ListBoxRow::new();
-            row.set_child(Some(&row_box));
-            self.idx_list_box.append(&row);
 
             // Edit index handler
             {
@@ -1350,6 +1595,33 @@ impl StructureTab {
                 });
             }
         }
+
+        // Compute natural full-content width for each column
+        let mut natural_widths = Vec::with_capacity(INDEX_HEADERS.len());
+        for (col_idx, (hdr_lbl, hdr_text)) in header_labels.iter().enumerate() {
+            let hdr_w = measure_single_line_text(hdr_lbl, hdr_text) + HEADER_EXTRA_PADDING;
+            if col_idx + 1 == INDEX_HEADERS.len() {
+                natural_widths.push(hdr_w.max(DEFAULT_ACTIONS_COL_WIDTH));
+            } else {
+                let sample = &widest_texts[col_idx];
+                let cell_w = if sample.is_empty() {
+                    0
+                } else if let Some(ref lbl) = sample_lbl {
+                    measure_single_line_text(lbl, sample) + CELL_EXTRA_PADDING
+                } else {
+                    measure_single_line_text(hdr_lbl, sample) + CELL_EXTRA_PADDING
+                };
+                natural_widths.push(hdr_w.max(cell_w).max(MIN_COLUMN_WIDTH));
+            }
+        }
+
+        *self.idx_natural_col_widths.borrow_mut() = natural_widths;
+        self.apply_idx_column_widths();
+
+        let tab_for_idle = self.clone();
+        gtk::glib::idle_add_local_once(move || {
+            tab_for_idle.reapply_idx_column_widths_if_viewport_changed();
+        });
     }
 
     fn suggest_index_name(table: &str, index_type: &str, columns: &[String]) -> String {
@@ -1976,5 +2248,105 @@ mod tests {
         let (pg_edit_opts, pg_edit_idx, _) =
             StructureTab::build_column_type_options(DbEngine::Postgres, Some(&existing_pg_col));
         assert_eq!(pg_edit_opts[pg_edit_idx], "JSONB");
+    }
+
+    #[test]
+    #[ignore]
+    fn verify_live_gtk_structure_grid_alignment() {
+        use crate::ui::workspace::WorkspaceContent;
+        use adw::prelude::*;
+
+        let _ = adw::init();
+        sourceview5::init();
+        crate::app::load_css();
+
+        let (cmd_tx, _cmd_rx) = async_channel::unbounded();
+        let workspace_content = WorkspaceContent::new(cmd_tx, |_| {});
+        workspace_content.stack.set_visible_child_name("structure");
+
+        let cols = vec![
+            ColumnInfo {
+                ordinal: 1,
+                name: "id".into(),
+                data_type: "bigint".into(),
+                is_nullable: false,
+                is_primary_key: true,
+                default_value: Some("nextval('orders_id_seq'::regclass)".into()),
+                extra: "GENERATED BY DEFAULT AS IDENTITY".into(),
+            },
+            ColumnInfo {
+                ordinal: 2,
+                name: "order_number".into(),
+                data_type: "varchar(32)".into(),
+                is_nullable: false,
+                is_primary_key: false,
+                default_value: None,
+                extra: "UNIQUE".into(),
+            },
+        ];
+        let idxs = vec![IndexInfo {
+            name: "orders_pkey".into(),
+            columns: vec!["id".into()],
+            is_unique: true,
+            is_primary: true,
+            index_type: "PRIMARY".into(),
+            method: "BTREE".into(),
+        }];
+
+        workspace_content
+            .structure_tab
+            .set_structure("commerce_prod", "orders", cols, idxs);
+
+        let win = adw::Window::builder()
+            .title("DBased")
+            .default_width(1440)
+            .default_height(920)
+            .content(&workspace_content.page)
+            .build();
+        win.present();
+
+        let ctx = gtk::glib::MainContext::default();
+        for _ in 0..60 {
+            while ctx.iteration(false) {}
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let grid = &workspace_content.structure_tab.grid;
+        assert!(grid.has_css_class("spreadsheet-grid"));
+        for col in 0..=STRUCTURE_HEADERS.len() as i32 {
+            let hdr = grid.child_at(col, 0).expect("structure header cell");
+            assert!(hdr.has_css_class("spreadsheet-header-box"));
+            let hdr_bounds = hdr.compute_bounds(grid).expect("hdr bounds");
+            for row in 1..=2 {
+                let cell = grid.child_at(col, row).expect("structure row cell");
+                if col == 0 {
+                    assert!(cell.has_css_class("spreadsheet-row-num"));
+                } else {
+                    assert!(cell.has_css_class("spreadsheet-cell"));
+                }
+                let cell_bounds = cell.compute_bounds(grid).expect("cell bounds");
+                assert_eq!(hdr_bounds.x(), cell_bounds.x());
+                assert_eq!(hdr_bounds.width(), cell_bounds.width());
+            }
+        }
+
+        let idx_grid = &workspace_content.structure_tab.idx_grid;
+        assert!(idx_grid.has_css_class("spreadsheet-grid"));
+        for col in 0..=INDEX_HEADERS.len() as i32 {
+            let hdr = idx_grid.child_at(col, 0).expect("index header cell");
+            assert!(hdr.has_css_class("spreadsheet-header-box"));
+            let hdr_bounds = hdr.compute_bounds(idx_grid).expect("idx hdr bounds");
+            let cell = idx_grid.child_at(col, 1).expect("index row cell");
+            if col == 0 {
+                assert!(cell.has_css_class("spreadsheet-row-num"));
+            } else {
+                assert!(cell.has_css_class("spreadsheet-cell"));
+            }
+            let cell_bounds = cell.compute_bounds(idx_grid).expect("idx cell bounds");
+            assert_eq!(hdr_bounds.x(), cell_bounds.x());
+            assert_eq!(hdr_bounds.width(), cell_bounds.width());
+        }
+
+        win.close();
     }
 }

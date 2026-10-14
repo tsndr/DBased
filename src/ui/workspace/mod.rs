@@ -331,22 +331,41 @@ where
     cell_box
 }
 
-/// Wraps a row cell widget in a fixed-width cell container that clips overflow
-/// so column widths in `ListBox` rows stay strictly aligned with resizable headers.
-pub fn wrap_resizable_row_cell<W: gtk4::prelude::IsA<gtk4::Widget>>(
-    child: &W,
-    width: i32,
-) -> gtk4::Box {
+/// Creates a read-only spreadsheet cell containing a monospace label with optional CSS classes
+/// and tooltip, styled consistently with the Content and Query spreadsheet grids.
+pub fn create_spreadsheet_label_cell(
+    text: &str,
+    extra_classes: &[&str],
+    tooltip: Option<&str>,
+) -> (gtk4::Box, gtk4::Label) {
     use gtk4 as gtk;
     use gtk4::prelude::*;
 
-    let cell = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-    cell.set_width_request(width);
-    cell.set_hexpand(false);
-    cell.set_overflow(gtk::Overflow::Hidden);
-    cell.add_css_class("table-row-cell");
-    child.set_margin_start(8);
-    child.set_margin_end(6);
-    cell.append(child);
-    cell
+    let cell_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    cell_box.add_css_class("spreadsheet-cell");
+    cell_box.set_overflow(gtk::Overflow::Hidden);
+
+    let lbl = gtk::Label::new(Some(text));
+    lbl.add_css_class("monospace");
+    for cls in extra_classes {
+        lbl.add_css_class(cls);
+    }
+    lbl.set_halign(gtk::Align::Fill);
+    lbl.set_valign(gtk::Align::Center);
+    lbl.set_xalign(0.0);
+    lbl.set_hexpand(true);
+    lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    lbl.set_max_width_chars(1);
+    lbl.set_margin_start(8);
+    lbl.set_margin_end(8);
+    lbl.set_margin_top(4);
+    lbl.set_margin_bottom(4);
+    if let Some(tt) = tooltip {
+        if !tt.is_empty() {
+            lbl.set_tooltip_text(Some(tt));
+        }
+    }
+
+    cell_box.append(&lbl);
+    (cell_box, lbl)
 }

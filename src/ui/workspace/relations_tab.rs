@@ -1,28 +1,37 @@
 use crate::db::models::{BackendCommand, ForeignKeyInfo, NewForeignKey};
-use crate::ui::workspace::{build_resizable_header_cell, wrap_resizable_row_cell};
+use crate::ui::workspace::{
+    CELL_EXTRA_PADDING, DEFAULT_DATA_COL_WIDTH, HEADER_EXTRA_PADDING, MIN_COLUMN_WIDTH,
+    build_resizable_header_cell, compute_auto_column_widths, create_spreadsheet_label_cell,
+    measure_single_line_text,
+};
 use adw::prelude::*;
 use async_channel::Sender;
 use gtk4 as gtk;
 use libadwaita as adw;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
+
+const DEFAULT_RELATIONS_INDEX_COL_WIDTH: i32 = 48;
+const DEFAULT_ACTION_COL_WIDTH: i32 = 76;
 
 const FK_ACTIONS: &[&str] = &["NO ACTION", "CASCADE", "SET NULL", "RESTRICT"];
 
-const RELATIONS_HEADERS: &[(&str, i32)] = &[
-    ("CONSTRAINT", 200),
-    ("LOCAL COLUMN", 150),
-    ("TARGET TABLE", 160),
-    ("TARGET COLUMN", 150),
-    ("ON UPDATE", 115),
-    ("ON DELETE", 115),
-    ("ACTION", 70),
+const RELATIONS_HEADERS: &[&str] = &[
+    "Constraint",
+    "Local Column",
+    "Target Table",
+    "Target Column",
+    "On Update",
+    "On Delete",
+    "Actions",
 ];
 
 #[derive(Clone)]
 pub struct RelationsTab {
     pub root: gtk::Box,
-    list_box: gtk::ListBox,
+    scroll: gtk::ScrolledWindow,
+    pub(crate) grid: gtk::Grid,
     header_label: gtk::Label,
     add_btn: gtk::Button,
     refresh_btn: gtk::Button,
@@ -30,8 +39,12 @@ pub struct RelationsTab {
     current_table: Rc<RefCell<String>>,
     local_columns: Rc<RefCell<Vec<String>>>,
     all_tables: Rc<RefCell<Vec<String>>>,
-    col_widths: Rc<RefCell<Vec<i32>>>,
-    row_cells: Rc<RefCell<Vec<Vec<gtk::Box>>>>,
+    relations: Rc<RefCell<Vec<ForeignKeyInfo>>>,
+    col_widths: Rc<RefCell<HashMap<usize, i32>>>,
+    natural_col_widths: Rc<RefCell<Vec<i32>>>,
+    header_cells: Rc<RefCell<Vec<(usize, gtk::Box)>>>,
+    last_viewport_width: Rc<RefCell<i32>>,
+    index_col_width: Rc<RefCell<i32>>,
     cmd_tx: Sender<BackendCommand>,
 }
 
@@ -42,10 +55,10 @@ impl RelationsTab {
         root.set_hexpand(true);
 
         let bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        bar.set_margin_top(10);
-        bar.set_margin_bottom(10);
-        bar.set_margin_start(16);
-        bar.set_margin_end(16);
+        bar.set_margin_top(8);
+        bar.set_margin_bottom(8);
+        bar.set_margin_start(12);
+        bar.set_margin_end(12);
 
         let header_label = gtk::Label::new(Some("Select a table to manage its relations"));
         header_label.add_css_class("heading");
@@ -72,86 +85,33 @@ impl RelationsTab {
         root.append(&bar);
         root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
 
-        let initial_widths: Vec<i32> = RELATIONS_HEADERS.iter().map(|(_, w)| *w).collect();
-        let col_widths = Rc::new(RefCell::new(initial_widths));
-        let row_cells: Rc<RefCell<Vec<Vec<gtk::Box>>>> = Rc::new(RefCell::new(Vec::new()));
-
-        let col_header = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        col_header.set_margin_top(8);
-        col_header.set_margin_bottom(8);
-        col_header.set_margin_start(16);
-        col_header.set_margin_end(16);
-
-        for (col_idx, (title, init_w)) in RELATIONS_HEADERS.iter().enumerate() {
-            let lbl = gtk::Label::new(Some(title));
-            lbl.add_css_class("caption-heading");
-            lbl.add_css_class("dim-label");
-            lbl.set_halign(gtk::Align::Fill);
-            lbl.set_xalign(0.0);
-            lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            lbl.set_max_width_chars(1);
-            lbl.set_margin_start(8);
-            lbl.set_margin_end(4);
-
-            let col_widths_ref = col_widths.clone();
-            let row_cells_ref = row_cells.clone();
-            let hdr_cell = build_resizable_header_cell(
-                &lbl,
-                *init_w,
-                Some("table-header-cell"),
-                move |new_w| {
-                    if let Some(w) = col_widths_ref.borrow_mut().get_mut(col_idx) {
-                        *w = new_w;
-                    }
-                    for row in row_cells_ref.borrow().iter() {
-                        if let Some(cell) = row.get(col_idx) {
-                            cell.set_width_request(new_w);
-                        }
-                    }
-                },
-            );
-            col_header.append(&hdr_cell);
-        }
-
-        let list_box = gtk::ListBox::new();
-        list_box.set_selection_mode(gtk::SelectionMode::None);
-        list_box.add_css_class("boxed-list");
-        list_box.add_css_class("resizable-boxed-list");
-        list_box.set_halign(gtk::Align::Start);
-        list_box.set_margin_top(12);
-        list_box.set_margin_bottom(16);
-        list_box.set_margin_start(16);
-        list_box.set_margin_end(16);
+        let grid = gtk::Grid::new();
+        grid.add_css_class("spreadsheet-grid");
+        grid.set_row_spacing(0);
+        grid.set_column_spacing(0);
+        grid.set_halign(gtk::Align::Start);
+        grid.set_valign(gtk::Align::Start);
 
         let scroll = gtk::ScrolledWindow::builder()
             .vexpand(true)
             .hexpand(true)
             .hscrollbar_policy(gtk::PolicyType::Automatic)
             .vscrollbar_policy(gtk::PolicyType::Automatic)
-            .child(&list_box)
+            .child(&grid)
             .build();
 
-        let header_scroll = gtk::ScrolledWindow::builder()
-            .hexpand(true)
-            .vexpand(false)
-            .hscrollbar_policy(gtk::PolicyType::External)
-            .vscrollbar_policy(gtk::PolicyType::Never)
-            .hadjustment(&scroll.hadjustment())
-            .child(&col_header)
-            .build();
-
-        root.append(&header_scroll);
-        root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
         root.append(&scroll);
 
         let current_db = Rc::new(RefCell::new(String::new()));
         let current_table = Rc::new(RefCell::new(String::new()));
         let local_columns = Rc::new(RefCell::new(Vec::new()));
         let all_tables = Rc::new(RefCell::new(Vec::new()));
+        let relations = Rc::new(RefCell::new(Vec::new()));
 
         let tab = Self {
             root,
-            list_box,
+            scroll: scroll.clone(),
+            grid,
             header_label,
             add_btn: add_btn.clone(),
             refresh_btn: refresh_btn.clone(),
@@ -159,10 +119,34 @@ impl RelationsTab {
             current_table: current_table.clone(),
             local_columns,
             all_tables,
-            col_widths,
-            row_cells,
+            relations,
+            col_widths: Rc::new(RefCell::new(HashMap::new())),
+            natural_col_widths: Rc::new(RefCell::new(Vec::new())),
+            header_cells: Rc::new(RefCell::new(Vec::new())),
+            last_viewport_width: Rc::new(RefCell::new(0)),
+            index_col_width: Rc::new(RefCell::new(DEFAULT_RELATIONS_INDEX_COL_WIDTH)),
             cmd_tx: cmd_tx.clone(),
         };
+
+        // Recompute auto column widths when the viewport width changes
+        {
+            let tab_clone = tab.clone();
+            scroll.hadjustment().connect_page_size_notify(move |_| {
+                let tab_for_idle = tab_clone.clone();
+                gtk::glib::idle_add_local_once(move || {
+                    tab_for_idle.reapply_column_widths_if_viewport_changed();
+                });
+            });
+        }
+        {
+            let tab_clone = tab.clone();
+            scroll.connect_map(move |_| {
+                let tab_for_idle = tab_clone.clone();
+                gtk::glib::idle_add_local_once(move || {
+                    tab_for_idle.reapply_column_widths_if_viewport_changed();
+                });
+            });
+        }
 
         // Refresh button
         {
@@ -189,6 +173,8 @@ impl RelationsTab {
             });
         }
 
+        tab.render_grid();
+
         tab
     }
 
@@ -205,113 +191,256 @@ impl RelationsTab {
         *self.all_tables.borrow_mut() = tables;
     }
 
-    pub fn set_relations(&self, database: &str, table: &str, relations: Vec<ForeignKeyInfo>) {
-        *self.current_db.borrow_mut() = database.to_string();
-        *self.current_table.borrow_mut() = table.to_string();
-        self.header_label.set_text(&format!(
-            "Table '{}' — {} foreign key relation(s)",
-            table,
-            relations.len()
-        ));
-        self.add_btn.set_sensitive(!table.is_empty());
-        self.refresh_btn.set_sensitive(!table.is_empty());
-
-        while let Some(child) = self.list_box.first_child() {
-            self.list_box.remove(&child);
+    fn available_viewport_width(&self) -> i32 {
+        let hadj_w = self.scroll.hadjustment().page_size().round() as i32;
+        if hadj_w > 0 {
+            return hadj_w;
         }
-        self.row_cells.borrow_mut().clear();
+        let scroll_w = self.scroll.width();
+        if scroll_w > 0 {
+            return scroll_w;
+        }
+        let root_w = self.root.width();
+        if root_w > 0 {
+            return root_w;
+        }
+        if let Some(win) = self
+            .root
+            .root()
+            .and_then(|r| r.downcast::<gtk::Window>().ok())
+        {
+            let win_w = win.width();
+            if win_w > 280 {
+                return win_w - 280;
+            }
+        }
+        960
+    }
 
-        if relations.is_empty() {
-            let empty_row = adw::ActionRow::builder()
-                .title("No foreign key relations defined on this table")
-                .subtitle("Click 'Add Relation' to create a foreign key constraint")
-                .build();
-            self.list_box.append(&empty_row);
+    fn reapply_column_widths_if_viewport_changed(&self) {
+        let viewport_w = self.available_viewport_width();
+        if viewport_w != *self.last_viewport_width.borrow() {
+            self.apply_column_widths();
+        }
+    }
+
+    fn apply_column_widths(&self) {
+        let viewport_w = self.available_viewport_width();
+        *self.last_viewport_width.borrow_mut() = viewport_w;
+
+        let header_cells = self.header_cells.borrow();
+        let natural_widths = self.natural_col_widths.borrow();
+        if header_cells.is_empty() || header_cells.len() != natural_widths.len() {
             return;
         }
 
-        let widths = self.col_widths.borrow().clone();
+        let actions_col_idx = RELATIONS_HEADERS.len().saturating_sub(1);
+        let manual_map = self.col_widths.borrow();
+        let manual_overrides: Vec<Option<i32>> = header_cells
+            .iter()
+            .map(|(col_idx, _)| {
+                if let Some(&w) = manual_map.get(col_idx) {
+                    Some(w)
+                } else if *col_idx == actions_col_idx {
+                    Some(DEFAULT_ACTION_COL_WIDTH)
+                } else {
+                    None
+                }
+            })
+            .collect();
 
-        for fk in relations {
-            let row_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-            row_box.set_margin_top(8);
-            row_box.set_margin_bottom(8);
+        let idx_w = *self.index_col_width.borrow();
+        let total_avail = (viewport_w - idx_w - 2).max(0);
+        let widths = compute_auto_column_widths(&natural_widths, &manual_overrides, total_avail);
 
-            let c_lbl = gtk::Label::new(Some(&fk.constraint_name));
-            c_lbl.add_css_class("heading");
-            c_lbl.set_halign(gtk::Align::Fill);
-            c_lbl.set_xalign(0.0);
-            c_lbl.set_hexpand(true);
-            c_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            c_lbl.set_max_width_chars(1);
-            c_lbl.set_tooltip_text(Some(&fk.constraint_name));
+        for ((_, hdr_cell), target_w) in header_cells.iter().zip(widths) {
+            if hdr_cell.width_request() != target_w {
+                hdr_cell.set_width_request(target_w);
+            }
+        }
+    }
 
-            let l_lbl = gtk::Label::new(Some(&fk.column_name));
-            l_lbl.add_css_class("monospace");
-            l_lbl.set_halign(gtk::Align::Fill);
-            l_lbl.set_xalign(0.0);
-            l_lbl.set_hexpand(true);
-            l_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            l_lbl.set_max_width_chars(1);
-            l_lbl.set_tooltip_text(Some(&fk.column_name));
+    pub fn set_relations(&self, database: &str, table: &str, relations: Vec<ForeignKeyInfo>) {
+        let table_changed = *self.current_db.borrow() != database
+            || *self.current_table.borrow() != table;
+        if table_changed {
+            self.col_widths.borrow_mut().clear();
+        }
+        *self.current_db.borrow_mut() = database.to_string();
+        *self.current_table.borrow_mut() = table.to_string();
+        *self.relations.borrow_mut() = relations;
+        self.render_grid();
+    }
 
-            let rt_lbl = gtk::Label::new(Some(&fk.referenced_table));
-            rt_lbl.add_css_class("accent");
-            rt_lbl.set_halign(gtk::Align::Fill);
-            rt_lbl.set_xalign(0.0);
-            rt_lbl.set_hexpand(true);
-            rt_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            rt_lbl.set_max_width_chars(1);
-            rt_lbl.set_tooltip_text(Some(&fk.referenced_table));
+    fn render_grid(&self) {
+        let table = self.current_table.borrow().clone();
+        let relations = self.relations.borrow().clone();
 
-            let rc_lbl = gtk::Label::new(Some(&fk.referenced_column));
-            rc_lbl.add_css_class("monospace");
-            rc_lbl.set_halign(gtk::Align::Fill);
-            rc_lbl.set_xalign(0.0);
-            rc_lbl.set_hexpand(true);
-            rc_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            rc_lbl.set_max_width_chars(1);
-            rc_lbl.set_tooltip_text(Some(&fk.referenced_column));
+        if table.is_empty() {
+            self.header_label
+                .set_text("Select a table to manage its relations");
+        } else {
+            self.header_label.set_text(&format!(
+                "Table '{}' — {} foreign key relation(s)",
+                table,
+                relations.len()
+            ));
+        }
+        self.add_btn.set_sensitive(!table.is_empty());
+        self.refresh_btn.set_sensitive(!table.is_empty());
 
-            let upd_lbl = gtk::Label::new(Some(&fk.update_rule));
-            upd_lbl.add_css_class("dim-label");
-            upd_lbl.set_halign(gtk::Align::Fill);
-            upd_lbl.set_xalign(0.0);
-            upd_lbl.set_hexpand(true);
-            upd_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            upd_lbl.set_max_width_chars(1);
+        while let Some(child) = self.grid.first_child() {
+            self.grid.remove(&child);
+        }
+        self.header_cells.borrow_mut().clear();
+        self.natural_col_widths.borrow_mut().clear();
 
-            let del_lbl = gtk::Label::new(Some(&fk.delete_rule));
-            del_lbl.add_css_class("dim-label");
-            del_lbl.set_halign(gtk::Align::Fill);
-            del_lbl.set_xalign(0.0);
-            del_lbl.set_hexpand(true);
-            del_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
-            del_lbl.set_max_width_chars(1);
+        // Header row (grid row 0)
+        let corner_lbl = gtk::Label::new(Some("#"));
+        corner_lbl.add_css_class("dim-label");
+        corner_lbl.set_halign(gtk::Align::Fill);
+        corner_lbl.set_xalign(0.5);
+        corner_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        corner_lbl.set_max_width_chars(1);
+        corner_lbl.set_margin_top(6);
+        corner_lbl.set_margin_bottom(6);
+
+        let idx_width = *self.index_col_width.borrow();
+        let idx_width_ref = self.index_col_width.clone();
+        let corner_cell = build_resizable_header_cell(
+            &corner_lbl,
+            idx_width,
+            Some("spreadsheet-header-box"),
+            move |new_w| {
+                *idx_width_ref.borrow_mut() = new_w;
+            },
+        );
+        self.grid.attach(&corner_cell, 0, 0, 1, 1);
+
+        let mut header_labels: Vec<(gtk::Label, &'static str)> =
+            Vec::with_capacity(RELATIONS_HEADERS.len());
+
+        for (col_idx, &title) in RELATIONS_HEADERS.iter().enumerate() {
+            let hdr_lbl = gtk::Label::new(Some(title));
+            hdr_lbl.add_css_class("heading");
+            hdr_lbl.set_halign(gtk::Align::Fill);
+            hdr_lbl.set_xalign(0.0);
+            hdr_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            hdr_lbl.set_max_width_chars(1);
+            hdr_lbl.set_margin_top(6);
+            hdr_lbl.set_margin_bottom(6);
+            hdr_lbl.set_margin_start(10);
+            hdr_lbl.set_margin_end(6);
+            hdr_lbl.set_tooltip_text(Some(title));
+
+            let col_w = self
+                .col_widths
+                .borrow()
+                .get(&col_idx)
+                .copied()
+                .unwrap_or(if col_idx + 1 == RELATIONS_HEADERS.len() {
+                    DEFAULT_ACTION_COL_WIDTH
+                } else {
+                    DEFAULT_DATA_COL_WIDTH
+                });
+            let col_widths_ref = self.col_widths.clone();
+            let hdr_cell = build_resizable_header_cell(
+                &hdr_lbl,
+                col_w,
+                Some("spreadsheet-header-box"),
+                move |new_w| {
+                    col_widths_ref.borrow_mut().insert(col_idx, new_w);
+                },
+            );
+
+            self.grid.attach(&hdr_cell, (col_idx + 1) as i32, 0, 1, 1);
+            header_labels.push((hdr_lbl, title));
+            self.header_cells.borrow_mut().push((col_idx, hdr_cell));
+        }
+
+        let mut sample_lbl: Option<gtk::Label> = None;
+        let mut widest_texts: Vec<String> = vec![String::new(); RELATIONS_HEADERS.len()];
+
+        for (row_idx, fk) in relations.into_iter().enumerate() {
+            let grid_row = (row_idx + 1) as i32;
+
+            let num_lbl = gtk::Label::new(Some(&(row_idx + 1).to_string()));
+            num_lbl.add_css_class("spreadsheet-row-num");
+            num_lbl.add_css_class("monospace");
+            num_lbl.add_css_class("caption");
+            num_lbl.add_css_class("dim-label");
+            num_lbl.set_halign(gtk::Align::Fill);
+            num_lbl.set_xalign(0.5);
+            num_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            num_lbl.set_max_width_chars(1);
+            self.grid.attach(&num_lbl, 0, grid_row, 1, 1);
+
+            let (c_cell, c_lbl) = create_spreadsheet_label_cell(
+                &fk.constraint_name,
+                &[],
+                Some(&fk.constraint_name),
+            );
+            if sample_lbl.is_none() {
+                sample_lbl = Some(c_lbl);
+            }
+
+            let (l_cell, _) =
+                create_spreadsheet_label_cell(&fk.column_name, &[], Some(&fk.column_name));
+            let (rt_cell, _) = create_spreadsheet_label_cell(
+                &fk.referenced_table,
+                &["accent"],
+                Some(&fk.referenced_table),
+            );
+            let (rc_cell, _) = create_spreadsheet_label_cell(
+                &fk.referenced_column,
+                &[],
+                Some(&fk.referenced_column),
+            );
+            let (upd_cell, _) =
+                create_spreadsheet_label_cell(&fk.update_rule, &["dim-label"], None);
+            let (del_cell, _) =
+                create_spreadsheet_label_cell(&fk.delete_rule, &["dim-label"], None);
+
+            let row_texts = [
+                fk.constraint_name.as_str(),
+                fk.column_name.as_str(),
+                fk.referenced_table.as_str(),
+                fk.referenced_column.as_str(),
+                fk.update_rule.as_str(),
+                fk.delete_rule.as_str(),
+            ];
+            for (i, txt) in row_texts.iter().enumerate() {
+                if txt.chars().count() > widest_texts[i].chars().count() {
+                    widest_texts[i] = (*txt).to_string();
+                }
+            }
+
+            let action_cell = gtk::Box::new(gtk::Orientation::Horizontal, 2);
+            action_cell.add_css_class("spreadsheet-cell");
+            action_cell.set_overflow(gtk::Overflow::Hidden);
 
             let drop_btn = gtk::Button::from_icon_name("user-trash-symbolic");
             drop_btn.add_css_class("flat");
             drop_btn.add_css_class("error");
+            drop_btn.add_css_class("cell-action-btn");
+            drop_btn.set_valign(gtk::Align::Center);
+            drop_btn.set_margin_start(6);
             drop_btn.set_tooltip_text(Some("Delete Foreign Key Relation"));
 
-            let cells = vec![
-                wrap_resizable_row_cell(&c_lbl, widths[0]),
-                wrap_resizable_row_cell(&l_lbl, widths[1]),
-                wrap_resizable_row_cell(&rt_lbl, widths[2]),
-                wrap_resizable_row_cell(&rc_lbl, widths[3]),
-                wrap_resizable_row_cell(&upd_lbl, widths[4]),
-                wrap_resizable_row_cell(&del_lbl, widths[5]),
-                wrap_resizable_row_cell(&drop_btn, widths[6]),
+            action_cell.append(&drop_btn);
+
+            let data_cells = [
+                c_cell,
+                l_cell,
+                rt_cell,
+                rc_cell,
+                upd_cell,
+                del_cell,
+                action_cell,
             ];
-
-            for cell in &cells {
-                row_box.append(cell);
+            for (col_idx, cell) in data_cells.iter().enumerate() {
+                self.grid.attach(cell, (col_idx + 1) as i32, grid_row, 1, 1);
             }
-            self.row_cells.borrow_mut().push(cells);
-
-            let row = gtk::ListBoxRow::new();
-            row.set_child(Some(&row_box));
-            self.list_box.append(&row);
 
             let tab_clone = self.clone();
             let cname = fk.constraint_name.clone();
@@ -319,6 +448,33 @@ impl RelationsTab {
                 tab_clone.confirm_drop_relation(btn.upcast_ref::<gtk::Widget>(), &cname);
             });
         }
+
+        // Compute natural full-content width for each column
+        let mut natural_widths = Vec::with_capacity(RELATIONS_HEADERS.len());
+        for (col_idx, (hdr_lbl, hdr_text)) in header_labels.iter().enumerate() {
+            let hdr_w = measure_single_line_text(hdr_lbl, hdr_text) + HEADER_EXTRA_PADDING;
+            if col_idx + 1 == RELATIONS_HEADERS.len() {
+                natural_widths.push(hdr_w.max(DEFAULT_ACTION_COL_WIDTH));
+            } else {
+                let sample = &widest_texts[col_idx];
+                let cell_w = if sample.is_empty() {
+                    0
+                } else if let Some(ref lbl) = sample_lbl {
+                    measure_single_line_text(lbl, sample) + CELL_EXTRA_PADDING
+                } else {
+                    measure_single_line_text(hdr_lbl, sample) + CELL_EXTRA_PADDING
+                };
+                natural_widths.push(hdr_w.max(cell_w).max(MIN_COLUMN_WIDTH));
+            }
+        }
+
+        *self.natural_col_widths.borrow_mut() = natural_widths;
+        self.apply_column_widths();
+
+        let tab_for_idle = self.clone();
+        gtk::glib::idle_add_local_once(move || {
+            tab_for_idle.reapply_column_widths_if_viewport_changed();
+        });
     }
 
     fn open_add_relation_dialog(&self, parent: &gtk::Widget) {
@@ -487,5 +643,83 @@ impl RelationsTab {
         });
 
         alert.present(Some(parent));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore]
+    fn verify_live_gtk_relations_grid_alignment() {
+        use crate::ui::workspace::WorkspaceContent;
+        use adw::prelude::*;
+
+        let _ = adw::init();
+        sourceview5::init();
+        crate::app::load_css();
+
+        let (cmd_tx, _cmd_rx) = async_channel::unbounded();
+        let workspace_content = WorkspaceContent::new(cmd_tx, |_| {});
+        workspace_content.stack.set_visible_child_name("relations");
+
+        let fks = vec![
+            ForeignKeyInfo {
+                constraint_name: "fk_orders_customer_id".into(),
+                column_name: "customer_id".into(),
+                referenced_table: "customers".into(),
+                referenced_column: "id".into(),
+                update_rule: "CASCADE".into(),
+                delete_rule: "RESTRICT".into(),
+            },
+            ForeignKeyInfo {
+                constraint_name: "fk_orders_coupon_id".into(),
+                column_name: "coupon_id".into(),
+                referenced_table: "coupons".into(),
+                referenced_column: "code".into(),
+                update_rule: "CASCADE".into(),
+                delete_rule: "SET NULL".into(),
+            },
+        ];
+
+        workspace_content
+            .relations_tab
+            .set_relations("commerce_prod", "orders", fks);
+
+        let win = adw::Window::builder()
+            .title("DBased")
+            .default_width(1440)
+            .default_height(920)
+            .content(&workspace_content.page)
+            .build();
+        win.present();
+
+        let ctx = gtk::glib::MainContext::default();
+        for _ in 0..60 {
+            while ctx.iteration(false) {}
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let grid = &workspace_content.relations_tab.grid;
+        assert!(grid.has_css_class("spreadsheet-grid"));
+        for col in 0..=RELATIONS_HEADERS.len() as i32 {
+            let hdr = grid.child_at(col, 0).expect("relations header cell");
+            assert!(hdr.has_css_class("spreadsheet-header-box"));
+            let hdr_bounds = hdr.compute_bounds(grid).expect("hdr bounds");
+            for row in 1..=2 {
+                let cell = grid.child_at(col, row).expect("relations row cell");
+                if col == 0 {
+                    assert!(cell.has_css_class("spreadsheet-row-num"));
+                } else {
+                    assert!(cell.has_css_class("spreadsheet-cell"));
+                }
+                let cell_bounds = cell.compute_bounds(grid).expect("cell bounds");
+                assert_eq!(hdr_bounds.x(), cell_bounds.x());
+                assert_eq!(hdr_bounds.width(), cell_bounds.width());
+            }
+        }
+
+        win.close();
     }
 }

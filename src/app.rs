@@ -44,17 +44,22 @@ const CUSTOM_CSS: &str = r#"
     border-right: 2px solid @accent_color;
 }
 
-.resizable-boxed-list > row {
-    padding: 0;
-}
-
 .structure-drag-handle {
     opacity: 0.4;
     transition: opacity 120ms ease;
 }
 
-row:hover .structure-drag-handle {
+.spreadsheet-row-num:hover .structure-drag-handle,
+.structure-drag-handle:hover {
     opacity: 0.9;
+}
+
+.cell-action-btn {
+    min-height: 20px;
+    min-width: 18px;
+    padding: 1px 2px;
+    margin: 2px 1px;
+    border-radius: 4px;
 }
 
 .structure-row-dragging {
