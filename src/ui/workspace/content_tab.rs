@@ -3,7 +3,7 @@ use crate::db::models::{
     BackendCommand, ColumnInfo, ContentQuery, DbValue, ForeignKeyInfo, PrimaryKeyValue, RowUpdate,
     SortDirection, TablePage,
 };
-use crate::ui::workspace::build_resizable_header_cell;
+use crate::ui::workspace::{MIN_COLUMN_WIDTH, build_resizable_header_cell};
 use adw::prelude::*;
 use async_channel::Sender;
 use gtk4 as gtk;
@@ -16,6 +16,10 @@ use std::rc::Rc;
 
 const DEFAULT_INDEX_COL_WIDTH: i32 = 64;
 const DEFAULT_DATA_COL_WIDTH: i32 = 160;
+const HEADER_EXTRA_PADDING: i32 = 34;
+const CELL_EXTRA_PADDING: i32 = 28;
+const FK_BTN_EXTRA_WIDTH: i32 = 30;
+const MAX_MEASURE_CHARS: usize = 1000;
 const MOUSE_BUTTON_BACK: u32 = 8;
 const MOUSE_BUTTON_FORWARD: u32 = 9;
 
@@ -29,6 +33,7 @@ struct NavigationEntry {
 #[derive(Clone)]
 pub struct ContentTab {
     pub root: gtk::Box,
+    scroll: gtk::ScrolledWindow,
     grid: gtk::Grid,
     nav_back_btn: gtk::Button,
     nav_forward_btn: gtk::Button,
@@ -52,6 +57,12 @@ pub struct ContentTab {
     selected_rows: Rc<RefCell<Vec<(usize, gtk::CheckButton)>>>,
     /// User-resized widths per column name
     col_widths: Rc<RefCell<HashMap<String, i32>>>,
+    /// Natural full-content widths per column index for the currently rendered grid
+    natural_col_widths: Rc<RefCell<Vec<i32>>>,
+    /// Header cell widgets per column for dynamic width updates
+    header_cells: Rc<RefCell<Vec<(String, gtk::Box)>>>,
+    /// Last viewport width used to compute auto column widths
+    last_viewport_width: Rc<RefCell<i32>>,
     /// User-resized width for the '#' index column
     index_col_width: Rc<RefCell<i32>>,
     cmd_tx: Sender<BackendCommand>,
@@ -207,6 +218,7 @@ impl ContentTab {
 
         let tab = Self {
             root: root.clone(),
+            scroll: scroll.clone(),
             grid,
             nav_back_btn: nav_back_btn.clone(),
             nav_forward_btn: nav_forward_btn.clone(),
@@ -226,9 +238,32 @@ impl ContentTab {
             draft_rows: Rc::new(RefCell::new(Vec::new())),
             selected_rows: Rc::new(RefCell::new(Vec::new())),
             col_widths: Rc::new(RefCell::new(HashMap::new())),
+            natural_col_widths: Rc::new(RefCell::new(Vec::new())),
+            header_cells: Rc::new(RefCell::new(Vec::new())),
+            last_viewport_width: Rc::new(RefCell::new(0)),
             index_col_width: Rc::new(RefCell::new(DEFAULT_INDEX_COL_WIDTH)),
             cmd_tx: cmd_tx.clone(),
         };
+
+        // Recompute auto column widths when the viewport width changes
+        {
+            let tab_clone = tab.clone();
+            scroll.hadjustment().connect_page_size_notify(move |_| {
+                let tab_for_idle = tab_clone.clone();
+                gtk::glib::idle_add_local_once(move || {
+                    tab_for_idle.reapply_column_widths_if_viewport_changed();
+                });
+            });
+        }
+        {
+            let tab_clone = tab.clone();
+            scroll.connect_map(move |_| {
+                let tab_for_idle = tab_clone.clone();
+                gtk::glib::idle_add_local_once(move || {
+                    tab_for_idle.reapply_column_widths_if_viewport_changed();
+                });
+            });
+        }
 
         // Ctrl+S & Back/Forward keyboard shortcut controller (Capture phase)
         {
@@ -591,6 +626,16 @@ impl ContentTab {
     }
 
     pub fn set_page(&self, page: TablePage) {
+        let table_changed = self
+            .current_page
+            .borrow()
+            .as_ref()
+            .map(|p| (&p.database, &p.table) != (&page.database, &page.table))
+            .unwrap_or(false);
+        if table_changed {
+            self.col_widths.borrow_mut().clear();
+        }
+
         self.dirty_cells.borrow_mut().clear();
         self.draft_rows.borrow_mut().clear();
         self.selected_rows.borrow_mut().clear();
@@ -618,11 +663,85 @@ impl ContentTab {
         self.render_grid();
     }
 
+    fn available_viewport_width(&self) -> i32 {
+        let hadj_w = self.scroll.hadjustment().page_size().round() as i32;
+        if hadj_w > 0 {
+            return hadj_w;
+        }
+        let scroll_w = self.scroll.width();
+        if scroll_w > 0 {
+            return scroll_w;
+        }
+        let root_w = self.root.width();
+        if root_w > 0 {
+            return root_w;
+        }
+        if let Some(win) = self.root.root().and_then(|r| r.downcast::<gtk::Window>().ok()) {
+            let win_w = win.width();
+            if win_w > 280 {
+                return win_w - 280;
+            }
+        }
+        960
+    }
+
+    fn reapply_column_widths_if_viewport_changed(&self) {
+        let viewport_w = self.available_viewport_width();
+        if viewport_w != *self.last_viewport_width.borrow() {
+            self.apply_column_widths();
+        }
+    }
+
+    fn apply_column_widths(&self) {
+        let viewport_w = self.available_viewport_width();
+        *self.last_viewport_width.borrow_mut() = viewport_w;
+
+        let header_cells = self.header_cells.borrow();
+        let natural_widths = self.natural_col_widths.borrow();
+        if header_cells.is_empty() || header_cells.len() != natural_widths.len() {
+            return;
+        }
+
+        let manual_map = self.col_widths.borrow();
+        let manual_overrides: Vec<Option<i32>> = header_cells
+            .iter()
+            .map(|(col_name, _)| manual_map.get(col_name).copied())
+            .collect();
+
+        let idx_w = *self.index_col_width.borrow();
+        let total_avail = (viewport_w - idx_w).max(0);
+        let widths = compute_auto_column_widths(&natural_widths, &manual_overrides, total_avail);
+
+        for ((_, hdr_cell), target_w) in header_cells.iter().zip(widths.into_iter()) {
+            if hdr_cell.width_request() != target_w {
+                hdr_cell.set_width_request(target_w);
+            }
+        }
+    }
+
+    fn measure_single_line_text<W: IsA<gtk::Widget>>(widget: &W, text: &str) -> i32 {
+        if text.is_empty() {
+            return 0;
+        }
+        let truncated: String;
+        let sample = if text.chars().count() > MAX_MEASURE_CHARS {
+            truncated = text.chars().take(MAX_MEASURE_CHARS).collect();
+            truncated.as_str()
+        } else {
+            text
+        };
+        let layout = widget.create_pango_layout(Some(sample));
+        layout.set_single_paragraph_mode(true);
+        layout.pixel_size().0
+    }
+
     fn render_grid(&self) {
         while let Some(child) = self.grid.first_child() {
             self.grid.remove(&child);
         }
         self.selected_rows.borrow_mut().clear();
+        self.header_cells.borrow_mut().clear();
+        self.natural_col_widths.borrow_mut().clear();
 
         let page_opt = self.current_page.borrow().clone();
         let Some(page) = page_opt else {
@@ -652,6 +771,8 @@ impl ContentTab {
             },
         );
         self.grid.attach(&corner_cell, 0, 0, 1, 1);
+
+        let mut header_labels: Vec<(gtk::Label, String)> = Vec::with_capacity(page.columns.len());
 
         for (col_idx, col_info) in page.columns.iter().enumerate() {
             let sort_indicator = if q.sort_column.as_deref() == Some(col_info.name.as_str()) {
@@ -726,7 +847,13 @@ impl ContentTab {
             );
 
             self.grid.attach(&hdr_cell, (col_idx + 1) as i32, 0, 1, 1);
+            header_labels.push((hdr_lbl, btn_label));
+            self.header_cells
+                .borrow_mut()
+                .push((col_info.name.clone(), hdr_cell));
         }
+
+        let mut sample_entry: Option<gtk::Entry> = None;
 
         // Existing Data Rows
         for (row_idx, row_data) in page.rows.iter().enumerate() {
@@ -777,6 +904,9 @@ impl ContentTab {
                     has_pk && row_data.pk.is_some(),
                     fk_opt.as_ref(),
                 );
+                if sample_entry.is_none() {
+                    sample_entry = Some(entry.clone());
+                }
                 if self
                     .dirty_cells
                     .borrow()
@@ -831,6 +961,90 @@ impl ContentTab {
             let grid_row = (page.rows.len() + draft_idx + 1) as i32;
             self.attach_draft_row_widgets(grid_row, draft_idx, &page.columns, draft_map);
         }
+
+        // Compute natural full-content width for each column
+        let dirty = self.dirty_cells.borrow();
+        let mut natural_widths = Vec::with_capacity(page.columns.len());
+
+        for (col_idx, col_info) in page.columns.iter().enumerate() {
+            let (hdr_lbl, btn_label) = &header_labels[col_idx];
+            let hdr_w = Self::measure_single_line_text(hdr_lbl, btn_label) + HEADER_EXTRA_PADDING;
+
+            let has_fk = relations.iter().any(|fk| fk.column_name == col_info.name);
+            let mut widest_val: Option<&DbValue> = None;
+            let mut max_score: usize = 0;
+
+            for (row_idx, row_data) in page.rows.iter().enumerate() {
+                let val = dirty
+                    .get(&(row_idx, col_info.name.clone()))
+                    .or_else(|| row_data.values.get(col_idx))
+                    .unwrap_or(&DbValue::Null);
+                let txt = val.display_text();
+                let char_score: usize = txt
+                    .chars()
+                    .take(MAX_MEASURE_CHARS)
+                    .map(|c| if c.is_ascii() { 1 } else { 2 })
+                    .sum();
+                let fk_bonus = if has_fk && !val.is_null() && !txt.is_empty() {
+                    4
+                } else {
+                    0
+                };
+                let score = char_score + fk_bonus;
+                if widest_val.is_none() || score > max_score {
+                    max_score = score;
+                    widest_val = Some(val);
+                }
+            }
+
+            for draft_map in &drafts {
+                let val = draft_map.get(&col_info.name).unwrap_or(&DbValue::Null);
+                let txt = val.display_text();
+                let char_score: usize = txt
+                    .chars()
+                    .take(MAX_MEASURE_CHARS)
+                    .map(|c| if c.is_ascii() { 1 } else { 2 })
+                    .sum();
+                let fk_bonus = if has_fk && !val.is_null() && !txt.is_empty() {
+                    4
+                } else {
+                    0
+                };
+                let score = char_score + fk_bonus;
+                if widest_val.is_none() || score > max_score {
+                    max_score = score;
+                    widest_val = Some(val);
+                }
+            }
+
+            let cell_w = if let Some(val) = widest_val {
+                let txt = val.display_text();
+                let text_px = if let Some(ref entry_widget) = sample_entry {
+                    Self::measure_single_line_text(entry_widget, txt)
+                } else {
+                    Self::measure_single_line_text(hdr_lbl, txt)
+                };
+                let fk_extra = if has_fk && !val.is_null() && !txt.is_empty() {
+                    FK_BTN_EXTRA_WIDTH
+                } else {
+                    0
+                };
+                text_px + CELL_EXTRA_PADDING + fk_extra
+            } else {
+                0
+            };
+
+            natural_widths.push(hdr_w.max(cell_w).max(MIN_COLUMN_WIDTH));
+        }
+        drop(dirty);
+
+        *self.natural_col_widths.borrow_mut() = natural_widths;
+        self.apply_column_widths();
+
+        let tab_for_idle = self.clone();
+        gtk::glib::idle_add_local_once(move || {
+            tab_for_idle.reapply_column_widths_if_viewport_changed();
+        });
     }
 
     fn update_ref_button_state(btn: &gtk::Button, fk: &ForeignKeyInfo, val: &DbValue) {
@@ -939,6 +1153,7 @@ impl ContentTab {
 
         let grid_row = (page.rows.len() + draft_idx + 1) as i32;
         self.attach_draft_row_widgets(grid_row, draft_idx, &page.columns, &initial_map);
+        self.apply_column_widths();
         self.update_dirty_badge();
     }
 
@@ -974,6 +1189,7 @@ impl ContentTab {
                 .iter()
                 .find(|fk| fk.column_name == col_info.name)
                 .cloned();
+            let has_fk = fk_opt.is_some();
             let (cell_box, entry, ref_btn_opt) =
                 self.create_spreadsheet_cell(&database, &val, true, fk_opt.as_ref());
             cell_box.add_css_class("cell-dirty");
@@ -997,6 +1213,17 @@ impl ContentTab {
 
             self.grid
                 .attach(&cell_box, (col_idx + 1) as i32, grid_row, 1, 1);
+
+            let txt = val.display_text();
+            let fk_extra = if has_fk && !val.is_null() && !txt.is_empty() {
+                FK_BTN_EXTRA_WIDTH
+            } else {
+                0
+            };
+            let cell_w = Self::measure_single_line_text(&entry, txt) + CELL_EXTRA_PADDING + fk_extra;
+            if let Some(nat_w) = self.natural_col_widths.borrow_mut().get_mut(col_idx) {
+                *nat_w = (*nat_w).max(cell_w);
+            }
 
             if col_idx == 0 {
                 let e_clone = entry.clone();
@@ -1207,3 +1434,135 @@ fn export_page_to_json(page: &TablePage, path: &std::path::Path) -> anyhow::Resu
     f.write_all(formatted.as_bytes())?;
     Ok(())
 }
+
+fn compute_auto_column_widths(
+    natural_widths: &[i32],
+    manual_overrides: &[Option<i32>],
+    total_avail: i32,
+) -> Vec<i32> {
+    let num_cols = natural_widths.len();
+    let mut widths = Vec::with_capacity(num_cols);
+    let mut is_manual = Vec::with_capacity(num_cols);
+
+    for i in 0..num_cols {
+        if let Some(Some(w)) = manual_overrides.get(i) {
+            widths.push((*w).max(MIN_COLUMN_WIDTH));
+            is_manual.push(true);
+        } else {
+            let nat_w = natural_widths[i].max(MIN_COLUMN_WIDTH);
+            widths.push(nat_w.min(DEFAULT_DATA_COL_WIDTH));
+            is_manual.push(false);
+        }
+    }
+
+    let current_sum: i32 = widths.iter().sum();
+    let mut remaining = (total_avail.max(0) - current_sum).max(0);
+
+    // Pass 1: Water-fill columns whose full content is wider than DEFAULT_DATA_COL_WIDTH
+    // up to their natural full-content width if available width allows for it.
+    while remaining > 0 {
+        let needy: Vec<usize> = (0..num_cols)
+            .filter(|&i| !is_manual[i] && widths[i] < natural_widths[i])
+            .collect();
+        if needy.is_empty() {
+            break;
+        }
+        let count = needy.len() as i32;
+        let min_deficit = needy
+            .iter()
+            .map(|&i| natural_widths[i] - widths[i])
+            .min()
+            .unwrap_or(0);
+        if min_deficit <= 0 {
+            break;
+        }
+        if min_deficit * count <= remaining {
+            for &i in &needy {
+                widths[i] += min_deficit;
+                remaining -= min_deficit;
+            }
+        } else {
+            let share = remaining / count;
+            let extra = remaining % count;
+            for (idx, &i) in needy.iter().enumerate() {
+                widths[i] += share + if (idx as i32) < extra { 1 } else { 0 };
+            }
+            remaining = 0;
+            break;
+        }
+    }
+
+    // Pass 2: If space still remains after all columns show their full content,
+    // expand narrow columns up to DEFAULT_DATA_COL_WIDTH so they don't look cramped.
+    while remaining > 0 {
+        let narrow: Vec<usize> = (0..num_cols)
+            .filter(|&i| !is_manual[i] && widths[i] < DEFAULT_DATA_COL_WIDTH)
+            .collect();
+        if narrow.is_empty() {
+            break;
+        }
+        let count = narrow.len() as i32;
+        let min_deficit = narrow
+            .iter()
+            .map(|&i| DEFAULT_DATA_COL_WIDTH - widths[i])
+            .min()
+            .unwrap_or(0);
+        if min_deficit <= 0 {
+            break;
+        }
+        if min_deficit * count <= remaining {
+            for &i in &narrow {
+                widths[i] += min_deficit;
+                remaining -= min_deficit;
+            }
+        } else {
+            let share = remaining / count;
+            let extra = remaining % count;
+            for (idx, &i) in narrow.iter().enumerate() {
+                widths[i] += share + if (idx as i32) < extra { 1 } else { 0 };
+            }
+            break;
+        }
+    }
+
+    widths
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_columns_show_full_content_when_available_width_allows() {
+        let natural = vec![80, 220, 340];
+        let manual = vec![None, None, None];
+        let widths = compute_auto_column_widths(&natural, &manual, 900);
+        // Plenty of width: wide columns expand to their full natural widths (220, 340)
+        // and the narrow column expands back to DEFAULT_DATA_COL_WIDTH (160).
+        assert_eq!(widths, vec![160, 220, 340]);
+    }
+
+    #[test]
+    fn test_water_fill_prioritizes_full_content_over_padding_narrow_columns() {
+        let natural = vec![80, 240, 480];
+        let manual = vec![None, None, None];
+        // Total natural is 800, available is 800: all 3 columns show 100% of their content
+        let widths = compute_auto_column_widths(&natural, &manual, 800);
+        assert_eq!(widths, vec![80, 240, 480]);
+
+        // Available is 700: col 0 (80) and col 1 (240) fit their full content,
+        // and col 2 gets the remaining 380px.
+        let widths_constrained = compute_auto_column_widths(&natural, &manual, 700);
+        assert_eq!(widths_constrained, vec![80, 240, 380]);
+    }
+
+    #[test]
+    fn test_manual_column_width_override_is_preserved() {
+        let natural = vec![80, 300, 400];
+        let manual = vec![None, Some(120), None];
+        let widths = compute_auto_column_widths(&natural, &manual, 700);
+        assert_eq!(widths[1], 120);
+        assert_eq!(widths[2], 400);
+    }
+}
+
