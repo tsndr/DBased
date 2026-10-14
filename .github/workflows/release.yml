@@ -179,15 +179,47 @@ jobs:
         with:
           key: fedora-41-x86_64
 
-      - name: Install cargo-generate-rpm
-        uses: taiki-e/install-action@cargo-generate-rpm
-
       - name: Build release binary & package RPM
         run: |
+          VERSION="${{ steps.version.outputs.version }}"
           cargo build --release --locked
           strip -s target/release/dbased
+
+          RPM_TOPDIR="$PWD/target/rpmbuild"
+          mkdir -p "$RPM_TOPDIR"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+
+          cat > "$RPM_TOPDIR/SPECS/dbased.spec" <<EOF
+          %global debug_package %{nil}
+          %define _build_id_links none
+
+          Name:           dbased
+          Version:        ${VERSION}
+          Release:        1%{?dist}
+          Summary:        Clean Libadwaita GUI Database Client for MySQL and PostgreSQL
+          License:        MIT
+          URL:            https://github.com/tsndr/dbased
+          Requires:       gtk4
+          Requires:       libadwaita
+          Requires:       gtksourceview5
+          Requires:       hicolor-icon-theme
+
+          %description
+          DBased is a lightweight, native Linux GUI database client built with Rust,
+          GTK4, Libadwaita, and GtkSourceView 5 for PostgreSQL and MySQL/MariaDB.
+
+          %install
+          make -C "$PWD" PREFIX=/usr DESTDIR=%{buildroot} install-files
+
+          %files
+          %{_bindir}/dbased
+          %{_datadir}/applications/${APP_ID}.desktop
+          %{_datadir}/icons/hicolor/scalable/apps/${APP_ID}.svg
+          %{_datadir}/metainfo/${APP_ID}.metainfo.xml
+          EOF
+
+          rpmbuild -bb --define "_topdir $RPM_TOPDIR" "$RPM_TOPDIR/SPECS/dbased.spec"
           mkdir -p dist
-          cargo generate-rpm -o "dist/dbased-${{ steps.version.outputs.version }}-1.x86_64.rpm"
+          cp -v "$RPM_TOPDIR"/RPMS/x86_64/dbased-*.rpm "dist/dbased-${VERSION}-1.x86_64.rpm"
 
       - name: Upload RPM artifact
         uses: actions/upload-artifact@v4
@@ -264,7 +296,13 @@ jobs:
       - name: Install Flatpak & GNOME 47 SDK
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends flatpak flatpak-builder appstream
+          sudo apt-get install -y --no-install-recommends \
+            appstream \
+            desktop-file-utils \
+            elfutils \
+            flatpak \
+            flatpak-builder \
+            librsvg2-common
           sudo flatpak remote-add --if-not-exists --system flathub https://dl.flathub.org/repo/flathub.flatpakrepo
           sudo flatpak install --system -y flathub \
             org.gnome.Platform//47 \
