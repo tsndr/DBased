@@ -91,9 +91,32 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                     root_stack.set_visible_child_name("connection");
                     show_toast("Disconnected");
                 }
+                BackendEvent::Refreshed {
+                    databases,
+                    selected_database,
+                    tables,
+                } => {
+                    let prev_db = sidebar.current_database();
+                    let new_db = selected_database.as_deref().unwrap_or("");
+                    if prev_db != new_db {
+                        workspace_content.content_tab.clear_navigation_history();
+                    }
+                    workspace_content.query_tab.set_database(new_db);
+                    let table_names: Vec<String> =
+                        tables.iter().map(|t| t.name.clone()).collect();
+                    workspace_content.relations_tab.set_all_tables(table_names);
+                    sidebar.set_databases_and_tables(
+                        &databases,
+                        selected_database.as_deref(),
+                        tables,
+                    );
+                }
                 BackendEvent::DatabaseSelected { database, tables } => {
                     workspace_content.content_tab.clear_navigation_history();
                     workspace_content.query_tab.set_database(&database);
+                    let table_names: Vec<String> =
+                        tables.iter().map(|t| t.name.clone()).collect();
+                    workspace_content.relations_tab.set_all_tables(table_names);
                     sidebar.set_tables(tables);
                 }
                 BackendEvent::TableLoaded {

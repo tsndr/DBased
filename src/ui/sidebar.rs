@@ -32,9 +32,9 @@ impl WorkspaceSidebar {
         disconnect_btn.set_tooltip_text(Some("Disconnect"));
         header.pack_start(&disconnect_btn);
 
-        let refresh_tables_btn = gtk::Button::from_icon_name("view-refresh-symbolic");
-        refresh_tables_btn.set_tooltip_text(Some("Refresh Tables"));
-        header.pack_end(&refresh_tables_btn);
+        let refresh_btn = gtk::Button::from_icon_name("view-refresh-symbolic");
+        refresh_btn.set_tooltip_text(Some("Refresh"));
+        header.pack_end(&refresh_btn);
 
         toolbar_view.add_top_bar(&header);
 
@@ -104,15 +104,14 @@ impl WorkspaceSidebar {
             });
         }
 
-        // Refresh tables button handler
+        // Refresh button handler
         {
             let cmd_tx = cmd_tx.clone();
             let selected_db = selected_db.clone();
-            refresh_tables_btn.connect_clicked(move |_| {
+            refresh_btn.connect_clicked(move |_| {
                 let db = selected_db.borrow().clone();
-                if !db.is_empty() {
-                    let _ = cmd_tx.send_blocking(BackendCommand::SelectDatabase(db));
-                }
+                let current_database = if db.is_empty() { None } else { Some(db) };
+                let _ = cmd_tx.send_blocking(BackendCommand::Refresh { current_database });
             });
         }
 
@@ -194,6 +193,17 @@ impl WorkspaceSidebar {
     ) {
         self.window_title.set_title(connection_name);
         self.window_title.set_subtitle(engine_label);
+        *self.selected_table.borrow_mut() = None;
+        self.set_databases_and_tables(databases, initial_db, tables);
+    }
+
+    pub fn set_databases_and_tables(
+        &self,
+        databases: &[String],
+        selected_db: Option<&str>,
+        tables: Vec<TableInfo>,
+    ) {
+        let prev_db = self.selected_db.borrow().clone();
 
         *self.suppress_db_signal.borrow_mut() = true;
         let count = self.db_model.n_items();
@@ -201,20 +211,38 @@ impl WorkspaceSidebar {
         self.db_model.splice(0, count, &str_refs);
 
         let mut chosen_idx = 0u32;
-        if let Some(target) = initial_db {
+        if let Some(target) = selected_db {
             if let Some(pos) = databases.iter().position(|d| d == target) {
                 chosen_idx = pos as u32;
                 *self.selected_db.borrow_mut() = target.to_string();
+            } else if let Some(first) = databases.first() {
+                *self.selected_db.borrow_mut() = first.clone();
+            } else {
+                self.selected_db.borrow_mut().clear();
             }
         } else if let Some(first) = databases.first() {
             *self.selected_db.borrow_mut() = first.clone();
+        } else {
+            self.selected_db.borrow_mut().clear();
         }
         if !databases.is_empty() {
             self.db_dropdown.set_selected(chosen_idx);
         }
         *self.suppress_db_signal.borrow_mut() = false;
 
-        self.set_tables(tables);
+        let new_db = self.selected_db.borrow().clone();
+        if prev_db == new_db {
+            let prev_table = self.selected_table.borrow().clone();
+            *self.all_tables.borrow_mut() = tables;
+            if let Some(ref tbl_name) = prev_table {
+                if !self.all_tables.borrow().iter().any(|t| &t.name == tbl_name) {
+                    *self.selected_table.borrow_mut() = None;
+                }
+            }
+            self.rebuild_table_list();
+        } else {
+            self.set_tables(tables);
+        }
     }
 
     pub fn set_tables(&self, tables: Vec<TableInfo>) {

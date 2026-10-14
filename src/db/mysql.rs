@@ -299,10 +299,25 @@ fn decode_mysql_cell(row: &MySqlRow, idx: usize) -> DbValue {
 impl DatabaseDriver for MySqlDriver {
     async fn list_databases(&self) -> Result<Vec<String>> {
         let pool = self.pool_for_db("").await?;
-        let rows = sqlx::raw_sql("SHOW DATABASES")
-            .fetch_all(&pool)
-            .await
-            .context("Failed to list MySQL databases")?;
+        let rows = match sqlx::raw_sql("SHOW DATABASES").fetch_all(&pool).await {
+            Ok(rows) => rows,
+            Err(_) => {
+                let fallback_pool = Self::create_pool(
+                    &self.host,
+                    self.port,
+                    &self.username,
+                    &self.password,
+                    "",
+                )
+                .await?;
+                let rows = sqlx::raw_sql("SHOW DATABASES")
+                    .fetch_all(&fallback_pool)
+                    .await
+                    .context("Failed to list MySQL databases")?;
+                *self.active_pool.write().await = (String::new(), fallback_pool);
+                rows
+            }
+        };
 
         let mut dbs = Vec::with_capacity(rows.len());
         for row in rows {

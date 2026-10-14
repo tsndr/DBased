@@ -663,13 +663,44 @@ fn decode_pg_cell(row: &PgRow, idx: usize) -> DbValue {
 #[async_trait]
 impl DatabaseDriver for PostgresDriver {
     async fn list_databases(&self) -> Result<Vec<String>> {
+        let query = "SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname";
         let pool = self.pool_for_db("").await?;
-        let rows = sqlx::raw_sql(
-            "SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname",
-        )
-        .fetch_all(&pool)
-        .await
-        .context("Failed to list PostgreSQL databases")?;
+        let rows = match sqlx::raw_sql(query).fetch_all(&pool).await {
+            Ok(rows) => rows,
+            Err(_) => {
+                let fallback_db = "postgres";
+                let fallback_pool = match Self::create_pool(
+                    &self.host,
+                    self.port,
+                    &self.username,
+                    &self.password,
+                    fallback_db,
+                )
+                .await
+                {
+                    Ok(p) => (fallback_db.to_string(), p),
+                    Err(first_err) if self.username != "postgres" => {
+                        let p = Self::create_pool(
+                            &self.host,
+                            self.port,
+                            &self.username,
+                            &self.password,
+                            &self.username,
+                        )
+                        .await
+                        .map_err(|_| first_err)?;
+                        (self.username.clone(), p)
+                    }
+                    Err(e) => return Err(e),
+                };
+                let rows = sqlx::raw_sql(query)
+                    .fetch_all(&fallback_pool.1)
+                    .await
+                    .context("Failed to list PostgreSQL databases")?;
+                *self.active_pool.write().await = fallback_pool;
+                rows
+            }
+        };
 
         let mut dbs = Vec::with_capacity(rows.len());
         for row in rows {

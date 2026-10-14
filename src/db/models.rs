@@ -345,6 +345,9 @@ pub enum BackendCommand {
     TestConnection(ConnectionProfile),
     Connect(ConnectionProfile),
     Disconnect,
+    Refresh {
+        current_database: Option<String>,
+    },
     SelectDatabase(String),
     SelectTable {
         database: String,
@@ -420,6 +423,11 @@ pub enum BackendEvent {
         tables: Vec<TableInfo>,
     },
     Disconnected,
+    Refreshed {
+        databases: Vec<String>,
+        selected_database: Option<String>,
+        tables: Vec<TableInfo>,
+    },
     DatabaseSelected {
         database: String,
         tables: Vec<TableInfo>,

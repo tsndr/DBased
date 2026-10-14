@@ -161,6 +161,61 @@ pub fn spawn_db_worker() -> (Sender<BackendCommand>, Receiver<BackendEvent>) {
                         session = None;
                         let _ = evt_tx.send(BackendEvent::Disconnected).await;
                     }
+                    BackendCommand::Refresh { current_database } => {
+                        if let Some(ref mut sess) = session {
+                            match sess.driver.list_databases().await {
+                                Ok(databases) => {
+                                    let selected_database = match current_database.as_deref() {
+                                        Some(cur)
+                                            if !cur.is_empty()
+                                                && databases.iter().any(|d| d == cur) =>
+                                        {
+                                            Some(cur.to_string())
+                                        }
+                                        _ => databases.first().cloned(),
+                                    };
+
+                                    let mut tables = Vec::new();
+                                    if let Some(ref db) = selected_database {
+                                        if let Err(e) = sess.driver.use_database(db).await {
+                                            let _ = evt_tx
+                                                .send(BackendEvent::Error(format!("{:#}", e)))
+                                                .await;
+                                            continue;
+                                        }
+                                        match sess.driver.list_tables(db).await {
+                                            Ok(t) => {
+                                                sess.cached_tables =
+                                                    t.iter().map(|ti| ti.name.clone()).collect();
+                                                tables = t;
+                                            }
+                                            Err(e) => {
+                                                let _ = evt_tx
+                                                    .send(BackendEvent::Error(format!("{:#}", e)))
+                                                    .await;
+                                                continue;
+                                            }
+                                        }
+                                    } else {
+                                        sess.cached_tables.clear();
+                                    }
+
+                                    let _ = evt_tx
+                                        .send(BackendEvent::Refreshed {
+                                            databases,
+                                            selected_database,
+                                            tables,
+                                        })
+                                        .await;
+                                }
+                                Err(e) => {
+                                    let _ = evt_tx
+                                        .send(BackendEvent::Error(format!("{:#}", e)))
+                                        .await;
+                                }
+                            }
+                        }
+                    }
                     BackendCommand::SelectDatabase(database) => {
                         if let Some(ref mut sess) = session {
                             if let Err(e) = sess.driver.use_database(&database).await {

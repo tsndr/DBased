@@ -404,7 +404,7 @@ impl ContentTab {
         root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
 
         // Bottom Pagination Bar
-        let bottom_bar = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        let bottom_bar = gtk::CenterBox::new();
         bottom_bar.set_margin_top(6);
         bottom_bar.set_margin_bottom(6);
         bottom_bar.set_margin_start(12);
@@ -413,11 +413,13 @@ impl ContentTab {
         let status_label = gtk::Label::new(Some("No table selected"));
         status_label.add_css_class("dim-label");
         status_label.set_halign(gtk::Align::Start);
-        status_label.set_hexpand(true);
 
         let hint_label = gtk::Label::new(Some("Click cell to edit · Ctrl+S to commit"));
         hint_label.add_css_class("caption");
         hint_label.add_css_class("dim-label");
+        hint_label.set_halign(gtk::Align::Center);
+
+        let page_controls = gtk::Box::new(gtk::Orientation::Horizontal, 10);
 
         let page_size_lbl = gtk::Label::new(Some("Rows per page:"));
         page_size_lbl.add_css_class("caption");
@@ -435,12 +437,14 @@ impl ContentTab {
         next_page_btn.set_tooltip_text(Some("Next Page"));
         next_page_btn.set_sensitive(false);
 
-        bottom_bar.append(&status_label);
-        bottom_bar.append(&hint_label);
-        bottom_bar.append(&page_size_lbl);
-        bottom_bar.append(&page_size_dd);
-        bottom_bar.append(&prev_page_btn);
-        bottom_bar.append(&next_page_btn);
+        page_controls.append(&page_size_lbl);
+        page_controls.append(&page_size_dd);
+        page_controls.append(&prev_page_btn);
+        page_controls.append(&next_page_btn);
+
+        bottom_bar.set_start_widget(Some(&status_label));
+        bottom_bar.set_center_widget(Some(&hint_label));
+        bottom_bar.set_end_widget(Some(&page_controls));
         root.append(&bottom_bar);
 
         let tab = Self {

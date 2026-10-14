@@ -186,6 +186,10 @@ impl RelationsTab {
         *self.all_tables.borrow_mut() = tables;
     }
 
+    pub fn set_all_tables(&self, tables: Vec<String>) {
+        *self.all_tables.borrow_mut() = tables;
+    }
+
     fn available_viewport_width(&self) -> i32 {
         let hadj_w = self.scroll.hadjustment().page_size().round() as i32;
         if hadj_w > 0 {
