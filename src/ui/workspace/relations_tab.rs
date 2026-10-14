@@ -65,10 +65,6 @@ impl RelationsTab {
         header_label.set_halign(gtk::Align::Start);
         header_label.set_hexpand(true);
 
-        let hint_lbl = gtk::Label::new(Some("Drag column borders to resize"));
-        hint_lbl.add_css_class("caption");
-        hint_lbl.add_css_class("dim-label");
-
         let refresh_btn = gtk::Button::from_icon_name("view-refresh-symbolic");
         refresh_btn.set_tooltip_text(Some("Refresh Relations"));
         refresh_btn.set_sensitive(false);
@@ -78,7 +74,6 @@ impl RelationsTab {
         add_btn.set_sensitive(false);
 
         bar.append(&header_label);
-        bar.append(&hint_lbl);
         bar.append(&refresh_btn);
         bar.append(&add_btn);
 

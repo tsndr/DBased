@@ -169,10 +169,6 @@ impl QueryTab {
         results_status.set_halign(gtk::Align::Start);
         results_status.set_hexpand(true);
 
-        let results_hint_lbl = gtk::Label::new(Some("Drag column borders to resize"));
-        results_hint_lbl.add_css_class("caption");
-        results_hint_lbl.add_css_class("dim-label");
-
         let export_popover = gtk::Popover::new();
         let exp_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
         exp_box.set_margin_top(8);
@@ -194,7 +190,6 @@ impl QueryTab {
         export_menu_btn.set_sensitive(false);
 
         results_bar.append(&results_status);
-        results_bar.append(&results_hint_lbl);
         results_bar.append(&export_menu_btn);
 
         bottom_box.append(&results_bar);

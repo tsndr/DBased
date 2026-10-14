@@ -415,9 +415,7 @@ impl ContentTab {
         status_label.set_halign(gtk::Align::Start);
         status_label.set_hexpand(true);
 
-        let hint_label = gtk::Label::new(Some(
-            "Click cell to edit · Drag column borders to resize · Ctrl+S to commit",
-        ));
+        let hint_label = gtk::Label::new(Some("Click cell to edit · Ctrl+S to commit"));
         hint_label.add_css_class("caption");
         hint_label.add_css_class("dim-label");
 
