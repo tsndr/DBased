@@ -18,6 +18,58 @@ pub struct ColumnInfo {
     pub extra: String,
 }
 
+impl ColumnInfo {
+    pub fn is_long_text(&self) -> bool {
+        is_long_text_data_type(&self.data_type)
+    }
+}
+
+/// Returns true if the SQL column data type represents a long or multiline text type
+/// (e.g. `TEXT`, `TINYTEXT`, `MEDIUMTEXT`, `LONGTEXT`, `CITEXT`, `NTEXT`, `CLOB`,
+/// `JSON`, `JSONB`, `XML`, unbounded `VARCHAR`, or `VARCHAR(N)` with `N > 255`).
+pub fn is_long_text_data_type(data_type: &str) -> bool {
+    let dt = data_type.trim().to_ascii_lowercase();
+    if dt.is_empty() {
+        return false;
+    }
+    if dt.contains("text")
+        || dt.contains("clob")
+        || dt == "json"
+        || dt == "jsonb"
+        || dt == "xml"
+        || dt == "long varchar"
+    {
+        return true;
+    }
+    if dt == "varchar" || dt == "nvarchar" || dt == "character varying" {
+        return true;
+    }
+    for prefix in [
+        "varchar(",
+        "nvarchar(",
+        "character varying(",
+        "char(",
+        "bpchar(",
+    ] {
+        if let Some(rest) = dt.strip_prefix(prefix) {
+            let inner = rest
+                .split(')')
+                .next()
+                .unwrap_or("")
+                .trim();
+            if inner.eq_ignore_ascii_case("max") {
+                return true;
+            }
+            if let Ok(len) = inner.parse::<usize>() {
+                if len > 255 {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnSpec {
     pub name: String,

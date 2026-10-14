@@ -91,10 +91,11 @@ box.spreadsheet-cell {
     padding: 0;
 }
 
-.spreadsheet-cell:focus-within {
+.spreadsheet-cell:focus-within,
+.spreadsheet-cell.cell-panel-active {
     outline: 2px solid @accent_color;
     outline-offset: -2px;
-    background: alpha(@accent_bg_color, 0.12);
+    background: alpha(@accent_bg_color, 0.14);
 }
 
 .spreadsheet-cell-entry {
@@ -130,6 +131,20 @@ box.spreadsheet-cell {
 .cell-null {
     color: alpha(@window_fg_color, 0.45);
     font-style: italic;
+}
+
+.long-text-panel {
+    background: @window_bg_color;
+    border-left: 1px solid alpha(@borders, 0.8);
+}
+
+.long-text-panel-header {
+    background: alpha(@headerbar_bg_color, 0.5);
+}
+
+.long-text-panel-footer {
+    background: alpha(@headerbar_bg_color, 0.35);
+    min-height: 24px;
 }
 
 .vim-status-bar {

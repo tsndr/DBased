@@ -8,6 +8,7 @@ use adw::prelude::*;
 use async_channel::Sender;
 use gtk4 as gtk;
 use libadwaita as adw;
+use sourceview5::prelude::*;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::File;
@@ -16,6 +17,8 @@ use std::rc::Rc;
 
 const DEFAULT_INDEX_COL_WIDTH: i32 = 64;
 const DEFAULT_DATA_COL_WIDTH: i32 = 160;
+const MAX_LONG_TEXT_AUTO_COL_WIDTH: i32 = 320;
+const DEFAULT_LONG_TEXT_PANEL_WIDTH: i32 = 380;
 const HEADER_EXTRA_PADDING: i32 = 34;
 const CELL_EXTRA_PADDING: i32 = 28;
 const FK_BTN_EXTRA_WIDTH: i32 = 30;
@@ -31,10 +34,65 @@ struct NavigationEntry {
 }
 
 #[derive(Clone)]
+enum LongTextTargetKind {
+    Existing {
+        row_idx: usize,
+        original_val: DbValue,
+        editable: bool,
+    },
+    Draft {
+        draft_idx: usize,
+        initial_val: DbValue,
+    },
+}
+
+#[derive(Clone)]
+struct LongTextPanelTarget {
+    kind: LongTextTargetKind,
+    col_info: ColumnInfo,
+    cell_box: gtk::Box,
+    cell_entry: gtk::Entry,
+    ref_btn_opt: Option<gtk::Button>,
+    fk_opt: Option<ForeignKeyInfo>,
+}
+
+impl LongTextPanelTarget {
+    fn is_editable(&self) -> bool {
+        match &self.kind {
+            LongTextTargetKind::Existing { editable, .. } => *editable,
+            LongTextTargetKind::Draft { .. } => true,
+        }
+    }
+
+    fn is_draft(&self) -> bool {
+        matches!(self.kind, LongTextTargetKind::Draft { .. })
+    }
+
+    fn baseline_value(&self) -> &DbValue {
+        match &self.kind {
+            LongTextTargetKind::Existing { original_val, .. } => original_val,
+            LongTextTargetKind::Draft { initial_val, .. } => initial_val,
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct ContentTab {
     pub root: gtk::Box,
+    content_paned: gtk::Paned,
     scroll: gtk::ScrolledWindow,
     grid: gtk::Grid,
+    editor_panel: gtk::Box,
+    panel_title_lbl: gtk::Label,
+    panel_subtitle_lbl: gtk::Label,
+    panel_status_lbl: gtk::Label,
+    panel_null_btn: gtk::Button,
+    panel_revert_btn: gtk::Button,
+    panel_buffer: sourceview5::Buffer,
+    panel_view: sourceview5::View,
+    panel_target: Rc<RefCell<Option<LongTextPanelTarget>>>,
+    panel_syncing: Rc<RefCell<bool>>,
+    panel_initial_pos_set: Rc<RefCell<bool>>,
     nav_back_btn: gtk::Button,
     nav_forward_btn: gtk::Button,
     search_entry: gtk::SearchEntry,
@@ -170,7 +228,177 @@ impl ContentTab {
             .vscrollbar_policy(gtk::PolicyType::Automatic)
             .child(&grid)
             .build();
-        root.append(&scroll);
+
+        // Separate Multiline Editor Panel for Long Text Columns
+        let editor_panel = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        editor_panel.add_css_class("long-text-panel");
+        editor_panel.set_width_request(300);
+        editor_panel.set_vexpand(true);
+        editor_panel.set_visible(false);
+
+        let panel_header = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        panel_header.add_css_class("long-text-panel-header");
+        panel_header.set_margin_top(0);
+        panel_header.set_margin_bottom(0);
+
+        let panel_header_inner = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        panel_header_inner.set_margin_top(8);
+        panel_header_inner.set_margin_bottom(8);
+        panel_header_inner.set_margin_start(12);
+        panel_header_inner.set_margin_end(8);
+        panel_header_inner.set_hexpand(true);
+
+        let panel_title_box = gtk::Box::new(gtk::Orientation::Vertical, 2);
+        panel_title_box.set_hexpand(true);
+        panel_title_box.set_valign(gtk::Align::Center);
+
+        let panel_title_lbl = gtk::Label::new(Some("Column"));
+        panel_title_lbl.add_css_class("heading");
+        panel_title_lbl.add_css_class("monospace");
+        panel_title_lbl.set_halign(gtk::Align::Start);
+        panel_title_lbl.set_xalign(0.0);
+        panel_title_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+
+        let panel_subtitle_lbl = gtk::Label::new(Some("TEXT"));
+        panel_subtitle_lbl.add_css_class("caption");
+        panel_subtitle_lbl.add_css_class("dim-label");
+        panel_subtitle_lbl.set_halign(gtk::Align::Start);
+        panel_subtitle_lbl.set_xalign(0.0);
+        panel_subtitle_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+
+        panel_title_box.append(&panel_title_lbl);
+        panel_title_box.append(&panel_subtitle_lbl);
+
+        let panel_null_btn = gtk::Button::with_label("Set NULL");
+        panel_null_btn.add_css_class("flat");
+        panel_null_btn.set_valign(gtk::Align::Center);
+        panel_null_btn.set_tooltip_text(Some("Set cell value to SQL NULL"));
+
+        let panel_revert_btn = gtk::Button::from_icon_name("edit-undo-symbolic");
+        panel_revert_btn.add_css_class("flat");
+        panel_revert_btn.set_valign(gtk::Align::Center);
+        panel_revert_btn.set_tooltip_text(Some("Revert cell to original value"));
+
+        let panel_close_btn = gtk::Button::from_icon_name("window-close-symbolic");
+        panel_close_btn.add_css_class("flat");
+        panel_close_btn.set_valign(gtk::Align::Center);
+        panel_close_btn.set_tooltip_text(Some("Close multiline editor (:q)"));
+
+        panel_header_inner.append(&panel_title_box);
+        panel_header_inner.append(&panel_null_btn);
+        panel_header_inner.append(&panel_revert_btn);
+        panel_header_inner.append(&panel_close_btn);
+        panel_header.append(&panel_header_inner);
+
+        editor_panel.append(&panel_header);
+        editor_panel.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+
+        let panel_buffer = sourceview5::Buffer::new(None);
+        Self::apply_panel_style_scheme(&panel_buffer);
+        {
+            let style_mgr = adw::StyleManager::default();
+            let buf_for_theme = panel_buffer.clone();
+            style_mgr.connect_dark_notify(move |_| {
+                Self::apply_panel_style_scheme(&buf_for_theme);
+            });
+        }
+
+        let panel_view = sourceview5::View::with_buffer(&panel_buffer);
+        panel_view.set_show_line_numbers(true);
+        panel_view.set_highlight_current_line(true);
+        panel_view.set_auto_indent(true);
+        panel_view.set_indent_on_tab(true);
+        panel_view.set_wrap_mode(gtk::WrapMode::WordChar);
+        panel_view.set_monospace(true);
+        panel_view.set_tab_width(2);
+        panel_view.set_insert_spaces_instead_of_tabs(true);
+        panel_view.set_top_margin(10);
+        panel_view.set_bottom_margin(10);
+        panel_view.set_left_margin(12);
+        panel_view.set_right_margin(12);
+        panel_view.set_vexpand(true);
+        panel_view.set_hexpand(true);
+
+        // Attach GtkSourceVimIMContext for Vim inputs in the multiline panel
+        let panel_vim_im = sourceview5::VimIMContext::new();
+        panel_vim_im.set_client_widget(Some(&panel_view));
+        let panel_vim_key_ctrl = gtk::EventControllerKey::new();
+        panel_vim_key_ctrl.set_propagation_phase(gtk::PropagationPhase::Capture);
+        panel_vim_key_ctrl.set_im_context(Some(&panel_vim_im));
+        panel_view.add_controller(panel_vim_key_ctrl);
+
+        let panel_scroll = gtk::ScrolledWindow::builder()
+            .vexpand(true)
+            .hexpand(true)
+            .hscrollbar_policy(gtk::PolicyType::Automatic)
+            .vscrollbar_policy(gtk::PolicyType::Automatic)
+            .child(&panel_view)
+            .build();
+        editor_panel.append(&panel_scroll);
+
+        editor_panel.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+
+        let panel_vim_bar = gtk::Box::new(gtk::Orientation::Horizontal, 10);
+        panel_vim_bar.add_css_class("vim-status-bar");
+        panel_vim_bar.set_margin_top(4);
+        panel_vim_bar.set_margin_bottom(4);
+        panel_vim_bar.set_margin_start(12);
+        panel_vim_bar.set_margin_end(12);
+
+        let panel_vim_mode_lbl = gtk::Label::new(Some("-- NORMAL --"));
+        panel_vim_mode_lbl.add_css_class("monospace");
+        panel_vim_mode_lbl.add_css_class("heading");
+        panel_vim_mode_lbl.set_halign(gtk::Align::Start);
+        panel_vim_mode_lbl.set_hexpand(true);
+
+        let panel_vim_cmd_lbl = gtk::Label::new(None);
+        panel_vim_cmd_lbl.add_css_class("monospace");
+        panel_vim_cmd_lbl.add_css_class("dim-label");
+
+        let panel_cursor_lbl = gtk::Label::new(Some("Ln 1, Col 1"));
+        panel_cursor_lbl.add_css_class("monospace");
+        panel_cursor_lbl.add_css_class("caption");
+        panel_cursor_lbl.add_css_class("dim-label");
+
+        panel_vim_bar.append(&panel_vim_mode_lbl);
+        panel_vim_bar.append(&panel_vim_cmd_lbl);
+        panel_vim_bar.append(&panel_cursor_lbl);
+        editor_panel.append(&panel_vim_bar);
+
+        editor_panel.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+
+        let panel_footer = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        panel_footer.add_css_class("long-text-panel-footer");
+        panel_footer.set_margin_top(4);
+        panel_footer.set_margin_bottom(4);
+        panel_footer.set_margin_start(12);
+        panel_footer.set_margin_end(12);
+
+        let panel_status_lbl = gtk::Label::new(Some("0 lines · 0 chars"));
+        panel_status_lbl.add_css_class("monospace");
+        panel_status_lbl.add_css_class("caption");
+        panel_status_lbl.add_css_class("dim-label");
+        panel_status_lbl.set_halign(gtk::Align::Start);
+        panel_status_lbl.set_hexpand(true);
+
+        let panel_hint_lbl = gtk::Label::new(Some(":w commit · :q close"));
+        panel_hint_lbl.add_css_class("caption");
+        panel_hint_lbl.add_css_class("dim-label");
+
+        panel_footer.append(&panel_status_lbl);
+        panel_footer.append(&panel_hint_lbl);
+        editor_panel.append(&panel_footer);
+
+        let content_paned = gtk::Paned::new(gtk::Orientation::Horizontal);
+        content_paned.set_vexpand(true);
+        content_paned.set_hexpand(true);
+        content_paned.set_start_child(Some(&scroll));
+        content_paned.set_resize_start_child(true);
+        content_paned.set_shrink_start_child(false);
+        content_paned.set_end_child(Some(&editor_panel));
+        content_paned.set_resize_end_child(false);
+        content_paned.set_shrink_end_child(false);
+        root.append(&content_paned);
 
         root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
 
@@ -218,8 +446,20 @@ impl ContentTab {
 
         let tab = Self {
             root: root.clone(),
+            content_paned: content_paned.clone(),
             scroll: scroll.clone(),
             grid,
+            editor_panel: editor_panel.clone(),
+            panel_title_lbl,
+            panel_subtitle_lbl,
+            panel_status_lbl,
+            panel_null_btn: panel_null_btn.clone(),
+            panel_revert_btn: panel_revert_btn.clone(),
+            panel_buffer: panel_buffer.clone(),
+            panel_view: panel_view.clone(),
+            panel_target: Rc::new(RefCell::new(None)),
+            panel_syncing: Rc::new(RefCell::new(false)),
+            panel_initial_pos_set: Rc::new(RefCell::new(false)),
             nav_back_btn: nav_back_btn.clone(),
             nav_forward_btn: nav_forward_btn.clone(),
             search_entry: search_entry.clone(),
@@ -244,6 +484,108 @@ impl ContentTab {
             index_col_width: Rc::new(RefCell::new(DEFAULT_INDEX_COL_WIDTH)),
             cmd_tx: cmd_tx.clone(),
         };
+
+        // Long text panel signals: Vim mode/command/cursor indicators, buffer change, Set NULL, Revert, Close
+        {
+            let panel_vim_mode_lbl = panel_vim_mode_lbl.clone();
+            panel_vim_im.connect_command_bar_text_notify(move |vim| {
+                let text = vim.command_bar_text();
+                if text.is_empty() {
+                    panel_vim_mode_lbl.set_text("-- NORMAL --");
+                } else {
+                    panel_vim_mode_lbl.set_text(&text);
+                }
+            });
+        }
+        {
+            let panel_vim_cmd_lbl = panel_vim_cmd_lbl.clone();
+            panel_vim_im.connect_command_text_notify(move |vim| {
+                panel_vim_cmd_lbl.set_text(&vim.command_text());
+            });
+        }
+        {
+            let panel_cursor_lbl = panel_cursor_lbl.clone();
+            panel_buffer.connect_cursor_position_notify(move |buf| {
+                let iter = buf.iter_at_offset(buf.cursor_position());
+                panel_cursor_lbl.set_text(&format!(
+                    "Ln {}, Col {}",
+                    iter.line() + 1,
+                    iter.line_offset() + 1
+                ));
+            });
+        }
+        {
+            let tab_clone = tab.clone();
+            panel_vim_im.connect_write(move |_, _, _| {
+                tab_clone.commit_pending_changes();
+            });
+        }
+        {
+            let tab_clone = tab.clone();
+            panel_vim_im.connect_execute_command(move |_, cmd| {
+                let normalized = cmd.trim().trim_start_matches(':').trim();
+                match normalized {
+                    "w" | "write" => {
+                        tab_clone.commit_pending_changes();
+                        true
+                    }
+                    "q" | "quit" => {
+                        tab_clone.close_long_text_panel();
+                        true
+                    }
+                    "wq" | "x" => {
+                        tab_clone.commit_pending_changes();
+                        tab_clone.close_long_text_panel();
+                        true
+                    }
+                    "q!" => {
+                        tab_clone.revert_active_panel_cell();
+                        tab_clone.close_long_text_panel();
+                        true
+                    }
+                    "e!" => {
+                        tab_clone.revert_active_panel_cell();
+                        true
+                    }
+                    _ => false,
+                }
+            });
+        }
+        {
+            let tab_clone = tab.clone();
+            panel_buffer.connect_changed(move |buf| {
+                if *tab_clone.panel_syncing.borrow() {
+                    return;
+                }
+                let text = buf
+                    .text(&buf.start_iter(), &buf.end_iter(), true)
+                    .to_string();
+                tab_clone.apply_panel_value(DbValue::Text(text));
+            });
+        }
+        {
+            let tab_clone = tab.clone();
+            panel_null_btn.connect_clicked(move |_| {
+                *tab_clone.panel_syncing.borrow_mut() = true;
+                tab_clone.panel_buffer.set_text("");
+                *tab_clone.panel_syncing.borrow_mut() = false;
+                tab_clone.apply_panel_value(DbValue::Null);
+                tab_clone.panel_view.grab_focus();
+            });
+        }
+        {
+            let tab_clone = tab.clone();
+            panel_revert_btn.connect_clicked(move |_| {
+                tab_clone.revert_active_panel_cell();
+                tab_clone.panel_view.grab_focus();
+            });
+        }
+        {
+            let tab_clone = tab.clone();
+            panel_close_btn.connect_clicked(move |_| {
+                tab_clone.close_long_text_panel();
+            });
+        }
 
         // Recompute auto column widths when the viewport width changes
         {
@@ -484,11 +826,301 @@ impl ContentTab {
     }
 
     pub fn clear_navigation_history(&self) {
+        self.close_long_text_panel();
         self.nav_back_stack.borrow_mut().clear();
         self.nav_forward_stack.borrow_mut().clear();
         *self.nav_in_progress.borrow_mut() = false;
         *self.current_page.borrow_mut() = None;
         self.update_nav_buttons();
+    }
+
+    fn apply_panel_style_scheme(buffer: &sourceview5::Buffer) {
+        let style_mgr = adw::StyleManager::default();
+        let scheme_mgr = sourceview5::StyleSchemeManager::default();
+        let preferred = if style_mgr.is_dark() {
+            ["Adwaita-dark", "classic-dark", "oblivion"]
+        } else {
+            ["Adwaita", "classic", "tango"]
+        };
+        for name in preferred {
+            if let Some(scheme) = scheme_mgr.scheme(name) {
+                buffer.set_style_scheme(Some(&scheme));
+                break;
+            }
+        }
+    }
+
+    fn apply_panel_syntax_language(buffer: &sourceview5::Buffer, data_type: &str) {
+        let dt = data_type.trim().to_ascii_lowercase();
+        let lang_id = if dt == "json" || dt == "jsonb" {
+            Some("json")
+        } else if dt == "xml" {
+            Some("xml")
+        } else {
+            None
+        };
+        let lang_mgr = sourceview5::LanguageManager::default();
+        if let Some(id) = lang_id.and_then(|id| lang_mgr.language(id)) {
+            buffer.set_language(Some(&id));
+            buffer.set_highlight_syntax(true);
+        } else {
+            buffer.set_language(None);
+            buffer.set_highlight_syntax(false);
+        }
+    }
+
+    fn update_panel_status_label(&self, val: &DbValue) {
+        match val {
+            DbValue::Null => {
+                self.panel_status_lbl
+                    .set_text("NULL — press i to insert");
+            }
+            DbValue::Text(s) => {
+                let chars = s.chars().count();
+                let lines = if s.is_empty() {
+                    1
+                } else {
+                    s.split('\n').count()
+                };
+                self.panel_status_lbl
+                    .set_text(&format!("{} line(s) · {} char(s)", lines, chars));
+            }
+        }
+    }
+
+    fn open_long_text_panel(&self, target: LongTextPanelTarget) {
+        if let Some(prev) = self.panel_target.borrow().as_ref() {
+            prev.cell_box.remove_css_class("cell-panel-active");
+        }
+        target.cell_box.add_css_class("cell-panel-active");
+
+        let current_val = match &target.kind {
+            LongTextTargetKind::Existing {
+                row_idx,
+                original_val,
+                ..
+            } => self
+                .dirty_cells
+                .borrow()
+                .get(&(*row_idx, target.col_info.name.clone()))
+                .cloned()
+                .unwrap_or_else(|| original_val.clone()),
+            LongTextTargetKind::Draft {
+                draft_idx,
+                initial_val,
+            } => self
+                .draft_rows
+                .borrow()
+                .get(*draft_idx)
+                .and_then(|m| m.get(&target.col_info.name))
+                .cloned()
+                .unwrap_or_else(|| initial_val.clone()),
+        };
+
+        let editable = target.is_editable();
+        let can_set_null =
+            editable && (target.col_info.is_nullable || target.is_draft());
+
+        let subtitle = match &target.kind {
+            LongTextTargetKind::Existing { row_idx, .. } => {
+                let offset = self
+                    .current_page
+                    .borrow()
+                    .as_ref()
+                    .map(|p| p.page_offset as usize)
+                    .unwrap_or(0);
+                let ro_suffix = if editable { "" } else { " (Read-only)" };
+                format!(
+                    "{} · Row #{}{}",
+                    target.col_info.data_type,
+                    offset + row_idx + 1,
+                    ro_suffix
+                )
+            }
+            LongTextTargetKind::Draft { draft_idx, .. } => {
+                format!("{} · NEW Row #{}", target.col_info.data_type, draft_idx + 1)
+            }
+        };
+
+        self.panel_title_lbl.set_text(&target.col_info.name);
+        self.panel_subtitle_lbl.set_text(&subtitle);
+        Self::apply_panel_syntax_language(&self.panel_buffer, &target.col_info.data_type);
+
+        *self.panel_syncing.borrow_mut() = true;
+        match &current_val {
+            DbValue::Null => {
+                self.panel_buffer.set_text("");
+                self.panel_view.add_css_class("cell-null");
+            }
+            DbValue::Text(s) => {
+                self.panel_buffer.set_text(s);
+                self.panel_view.remove_css_class("cell-null");
+            }
+        }
+        *self.panel_syncing.borrow_mut() = false;
+
+        self.panel_view.set_editable(editable);
+        self.panel_null_btn
+            .set_sensitive(can_set_null && !current_val.is_null());
+        self.panel_revert_btn
+            .set_sensitive(editable && &current_val != target.baseline_value());
+        self.update_panel_status_label(&current_val);
+
+        *self.panel_target.borrow_mut() = Some(target);
+
+        let was_visible = self.editor_panel.is_visible();
+        if !was_visible {
+            if !*self.panel_initial_pos_set.borrow() {
+                let total_w = self.content_paned.width().max(self.root.width());
+                if total_w > DEFAULT_LONG_TEXT_PANEL_WIDTH + 200 {
+                    self.content_paned
+                        .set_position(total_w - DEFAULT_LONG_TEXT_PANEL_WIDTH);
+                    *self.panel_initial_pos_set.borrow_mut() = true;
+                }
+            }
+            self.editor_panel.set_visible(true);
+            let tab_for_idle = self.clone();
+            gtk::glib::idle_add_local_once(move || {
+                tab_for_idle.reapply_column_widths_if_viewport_changed();
+            });
+        }
+
+        let view_clone = self.panel_view.clone();
+        gtk::glib::idle_add_local_once(move || {
+            view_clone.grab_focus();
+        });
+    }
+
+    pub fn close_long_text_panel(&self) {
+        let prev_opt = self.panel_target.borrow_mut().take();
+        if let Some(prev) = prev_opt {
+            prev.cell_box.remove_css_class("cell-panel-active");
+            prev.cell_entry.grab_focus();
+        }
+        if self.editor_panel.is_visible() {
+            self.editor_panel.set_visible(false);
+            let tab_for_idle = self.clone();
+            gtk::glib::idle_add_local_once(move || {
+                tab_for_idle.reapply_column_widths_if_viewport_changed();
+            });
+        }
+    }
+
+    fn revert_active_panel_cell(&self) {
+        let baseline = {
+            let target_ref = self.panel_target.borrow();
+            target_ref.as_ref().map(|t| t.baseline_value().clone())
+        };
+        if let Some(baseline_val) = baseline {
+            *self.panel_syncing.borrow_mut() = true;
+            match &baseline_val {
+                DbValue::Null => self.panel_buffer.set_text(""),
+                DbValue::Text(s) => self.panel_buffer.set_text(s),
+            }
+            *self.panel_syncing.borrow_mut() = false;
+            self.apply_panel_value(baseline_val);
+        }
+    }
+
+    fn apply_panel_value(&self, new_val: DbValue) {
+        let target_opt = self.panel_target.borrow().clone();
+        let Some(target) = target_opt else {
+            return;
+        };
+        if !target.is_editable() {
+            return;
+        }
+
+        if new_val.is_null() {
+            self.panel_view.add_css_class("cell-null");
+            target.cell_entry.add_css_class("cell-null");
+        } else {
+            self.panel_view.remove_css_class("cell-null");
+            target.cell_entry.remove_css_class("cell-null");
+        }
+        target
+            .cell_entry
+            .set_text(&format_long_text_preview(&new_val));
+
+        if let (Some(btn), Some(fk)) = (&target.ref_btn_opt, &target.fk_opt) {
+            Self::update_ref_button_state(btn, fk, &new_val);
+        }
+
+        match &target.kind {
+            LongTextTargetKind::Existing {
+                row_idx,
+                original_val,
+                ..
+            } => {
+                if &new_val != original_val {
+                    target.cell_box.add_css_class("cell-dirty");
+                    self.dirty_cells
+                        .borrow_mut()
+                        .insert((*row_idx, target.col_info.name.clone()), new_val.clone());
+                } else {
+                    target.cell_box.remove_css_class("cell-dirty");
+                    self.dirty_cells
+                        .borrow_mut()
+                        .remove(&(*row_idx, target.col_info.name.clone()));
+                }
+                self.update_dirty_badge();
+            }
+            LongTextTargetKind::Draft { draft_idx, .. } => {
+                if let Some(row_map) = self.draft_rows.borrow_mut().get_mut(*draft_idx) {
+                    row_map.insert(target.col_info.name.clone(), new_val.clone());
+                }
+            }
+        }
+
+        let can_set_null = target.is_editable()
+            && (target.col_info.is_nullable || target.is_draft());
+        self.panel_null_btn
+            .set_sensitive(can_set_null && !new_val.is_null());
+        self.panel_revert_btn
+            .set_sensitive(&new_val != target.baseline_value());
+        self.update_panel_status_label(&new_val);
+    }
+
+    fn attach_long_text_cell_handlers(
+        &self,
+        target: LongTextPanelTarget,
+        edit_btn_opt: Option<gtk::Button>,
+    ) {
+        let click = gtk::GestureClick::new();
+        click.set_button(1);
+        click.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let tab_for_click = self.clone();
+        let target_for_click = target.clone();
+        click.connect_released(move |gesture, n_press, _, _| {
+            if n_press >= 1 {
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+                tab_for_click.open_long_text_panel(target_for_click.clone());
+            }
+        });
+        target.cell_entry.add_controller(click);
+
+        let key_ctrl = gtk::EventControllerKey::new();
+        let tab_for_key = self.clone();
+        let target_for_key = target.clone();
+        key_ctrl.connect_key_pressed(move |_, keyval, _, _| {
+            if keyval == gtk::gdk::Key::Return
+                || keyval == gtk::gdk::Key::KP_Enter
+                || keyval == gtk::gdk::Key::space
+            {
+                tab_for_key.open_long_text_panel(target_for_key.clone());
+                return gtk::glib::Propagation::Stop;
+            }
+            gtk::glib::Propagation::Proceed
+        });
+        target.cell_entry.add_controller(key_ctrl);
+
+        if let Some(edit_btn) = edit_btn_opt {
+            let tab_for_btn = self.clone();
+            let target_for_btn = target;
+            edit_btn.connect_clicked(move |_| {
+                tab_for_btn.open_long_text_panel(target_for_btn.clone());
+            });
+        }
     }
 
     fn update_nav_buttons(&self) {
@@ -636,6 +1268,7 @@ impl ContentTab {
             self.col_widths.borrow_mut().clear();
         }
 
+        self.close_long_text_panel();
         self.dirty_cells.borrow_mut().clear();
         self.draft_rows.borrow_mut().clear();
         self.selected_rows.borrow_mut().clear();
@@ -736,6 +1369,7 @@ impl ContentTab {
     }
 
     fn render_grid(&self) {
+        self.close_long_text_panel();
         while let Some(child) = self.grid.first_child() {
             self.grid.remove(&child);
         }
@@ -864,8 +1498,10 @@ impl ContentTab {
             row_selector_box.set_overflow(gtk::Overflow::Hidden);
 
             let check = gtk::CheckButton::new();
-            check.set_sensitive(has_pk && row_data.pk.is_some());
-            let num_lbl = gtk::Label::new(Some(&(page.page_offset as usize + row_idx + 1).to_string()));
+            let row_editable = has_pk && row_data.pk.is_some();
+            check.set_sensitive(row_editable);
+            let num_lbl =
+                gtk::Label::new(Some(&(page.page_offset as usize + row_idx + 1).to_string()));
             num_lbl.add_css_class("monospace");
             num_lbl.add_css_class("caption");
             num_lbl.add_css_class("dim-label");
@@ -897,13 +1533,16 @@ impl ContentTab {
                     .iter()
                     .find(|fk| fk.column_name == col_info.name)
                     .cloned();
+                let is_long_text = col_info.is_long_text();
 
-                let (cell_box, entry, ref_btn_opt) = self.create_spreadsheet_cell(
-                    &page.database,
-                    &current_val,
-                    has_pk && row_data.pk.is_some(),
-                    fk_opt.as_ref(),
-                );
+                let (cell_box, entry, ref_btn_opt, long_text_btn_opt) = self
+                    .create_spreadsheet_cell(
+                        &page.database,
+                        &current_val,
+                        row_editable,
+                        is_long_text,
+                        fk_opt.as_ref(),
+                    );
                 if sample_entry.is_none() {
                     sample_entry = Some(entry.clone());
                 }
@@ -915,40 +1554,56 @@ impl ContentTab {
                     cell_box.add_css_class("cell-dirty");
                 }
 
-                let tab_clone = self.clone();
-                let col_name = col_info.name.clone();
-                let orig = original_val.clone();
-                let cell_box_ref = cell_box.clone();
-                entry.connect_changed(move |e| {
-                    let new_val = DbValue::from_editor_str(&e.text());
-                    if let (Some(btn), Some(fk)) = (&ref_btn_opt, &fk_opt) {
-                        Self::update_ref_button_state(btn, fk, &new_val);
-                    }
-                    if new_val != orig {
-                        cell_box_ref.add_css_class("cell-dirty");
-                        if new_val.is_null() {
-                            e.add_css_class("cell-null");
-                        } else {
-                            e.remove_css_class("cell-null");
+                if is_long_text {
+                    let target = LongTextPanelTarget {
+                        kind: LongTextTargetKind::Existing {
+                            row_idx,
+                            original_val,
+                            editable: row_editable,
+                        },
+                        col_info: col_info.clone(),
+                        cell_box: cell_box.clone(),
+                        cell_entry: entry.clone(),
+                        ref_btn_opt,
+                        fk_opt,
+                    };
+                    self.attach_long_text_cell_handlers(target, long_text_btn_opt);
+                } else {
+                    let tab_clone = self.clone();
+                    let col_name = col_info.name.clone();
+                    let orig = original_val.clone();
+                    let cell_box_ref = cell_box.clone();
+                    entry.connect_changed(move |e| {
+                        let new_val = DbValue::from_editor_str(&e.text());
+                        if let (Some(btn), Some(fk)) = (&ref_btn_opt, &fk_opt) {
+                            Self::update_ref_button_state(btn, fk, &new_val);
                         }
-                        tab_clone
-                            .dirty_cells
-                            .borrow_mut()
-                            .insert((row_idx, col_name.clone()), new_val);
-                    } else {
-                        cell_box_ref.remove_css_class("cell-dirty");
-                        if orig.is_null() {
-                            e.add_css_class("cell-null");
+                        if new_val != orig {
+                            cell_box_ref.add_css_class("cell-dirty");
+                            if new_val.is_null() {
+                                e.add_css_class("cell-null");
+                            } else {
+                                e.remove_css_class("cell-null");
+                            }
+                            tab_clone
+                                .dirty_cells
+                                .borrow_mut()
+                                .insert((row_idx, col_name.clone()), new_val);
                         } else {
-                            e.remove_css_class("cell-null");
+                            cell_box_ref.remove_css_class("cell-dirty");
+                            if orig.is_null() {
+                                e.add_css_class("cell-null");
+                            } else {
+                                e.remove_css_class("cell-null");
+                            }
+                            tab_clone
+                                .dirty_cells
+                                .borrow_mut()
+                                .remove(&(row_idx, col_name.clone()));
                         }
-                        tab_clone
-                            .dirty_cells
-                            .borrow_mut()
-                            .remove(&(row_idx, col_name.clone()));
-                    }
-                    tab_clone.update_dirty_badge();
-                });
+                        tab_clone.update_dirty_badge();
+                    });
+                }
 
                 self.grid
                     .attach(&cell_box, (col_idx + 1) as i32, grid_row, 1, 1);
@@ -971,6 +1626,7 @@ impl ContentTab {
             let hdr_w = Self::measure_single_line_text(hdr_lbl, btn_label) + HEADER_EXTRA_PADDING;
 
             let has_fk = relations.iter().any(|fk| fk.column_name == col_info.name);
+            let is_long_text = col_info.is_long_text();
             let mut widest_val: Option<&DbValue> = None;
             let mut max_score: usize = 0;
 
@@ -1018,7 +1674,13 @@ impl ContentTab {
             }
 
             let cell_w = if let Some(val) = widest_val {
-                let txt = val.display_text();
+                let preview_cow;
+                let txt = if is_long_text {
+                    preview_cow = format_long_text_preview(val);
+                    preview_cow.as_str()
+                } else {
+                    val.display_text()
+                };
                 let text_px = if let Some(ref entry_widget) = sample_entry {
                     Self::measure_single_line_text(entry_widget, txt)
                 } else {
@@ -1029,7 +1691,13 @@ impl ContentTab {
                 } else {
                     0
                 };
-                text_px + CELL_EXTRA_PADDING + fk_extra
+                let long_text_extra = if is_long_text { FK_BTN_EXTRA_WIDTH } else { 0 };
+                let raw_cell_w = text_px + CELL_EXTRA_PADDING + fk_extra + long_text_extra;
+                if is_long_text {
+                    raw_cell_w.min(MAX_LONG_TEXT_AUTO_COL_WIDTH)
+                } else {
+                    raw_cell_w
+                }
             } else {
                 0
             };
@@ -1065,8 +1733,9 @@ impl ContentTab {
         database: &str,
         val: &DbValue,
         editable: bool,
+        is_long_text: bool,
         fk: Option<&ForeignKeyInfo>,
-    ) -> (gtk::Box, gtk::Entry, Option<gtk::Button>) {
+    ) -> (gtk::Box, gtk::Entry, Option<gtk::Button>, Option<gtk::Button>) {
         let cell_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
         cell_box.add_css_class("spreadsheet-cell");
         cell_box.set_overflow(gtk::Overflow::Hidden);
@@ -1075,32 +1744,52 @@ impl ContentTab {
         entry.set_has_frame(false);
         entry.add_css_class("spreadsheet-cell-entry");
         entry.add_css_class("monospace");
-        entry.set_editable(editable);
+        entry.set_editable(editable && !is_long_text);
         entry.set_hexpand(true);
         entry.set_width_chars(1);
         entry.set_max_width_chars(1);
-        entry.set_text(val.display_text());
+        if is_long_text {
+            entry.set_text(&format_long_text_preview(val));
+            entry.set_tooltip_text(Some("Click to open multiline editor panel"));
+        } else {
+            entry.set_text(val.display_text());
+        }
         if val.is_null() {
             entry.add_css_class("cell-null");
         }
 
-        // When user clicks or focuses the cell, immediately select its full text content
-        // so typing overwrites it just like an Excel / spreadsheet cell!
-        let click = gtk::GestureClick::new();
-        let entry_weak = entry.downgrade();
-        click.connect_released(move |_, n_press, _, _| {
-            if n_press == 1 {
-                if let Some(e) = entry_weak.upgrade() {
-                    let e_clone = e.clone();
-                    gtk::glib::idle_add_local_once(move || {
-                        e_clone.grab_focus();
-                        e_clone.select_region(0, -1);
-                    });
+        if !is_long_text {
+            // When user clicks or focuses a short cell, immediately select its full text content
+            // so typing overwrites it just like an Excel / spreadsheet cell!
+            let click = gtk::GestureClick::new();
+            let entry_weak = entry.downgrade();
+            click.connect_released(move |_, n_press, _, _| {
+                if n_press == 1 {
+                    if let Some(e) = entry_weak.upgrade() {
+                        let e_clone = e.clone();
+                        gtk::glib::idle_add_local_once(move || {
+                            e_clone.grab_focus();
+                            e_clone.select_region(0, -1);
+                        });
+                    }
                 }
-            }
-        });
-        entry.add_controller(click);
+            });
+            entry.add_controller(click);
+        }
         cell_box.append(&entry);
+
+        let long_text_btn_opt = if is_long_text {
+            let edit_btn = gtk::Button::from_icon_name("document-edit-symbolic");
+            edit_btn.add_css_class("flat");
+            edit_btn.add_css_class("cell-ref-btn");
+            edit_btn.set_valign(gtk::Align::Center);
+            edit_btn.set_focus_on_click(false);
+            edit_btn.set_tooltip_text(Some("Open multiline editor panel"));
+            cell_box.append(&edit_btn);
+            Some(edit_btn)
+        } else {
+            None
+        };
 
         let ref_btn_opt = if let Some(fk_info) = fk {
             let btn = gtk::Button::from_icon_name("go-next-symbolic");
@@ -1126,7 +1815,7 @@ impl ContentTab {
             None
         };
 
-        (cell_box, entry, ref_btn_opt)
+        (cell_box, entry, ref_btn_opt, long_text_btn_opt)
     }
 
     fn append_draft_row(&self) {
@@ -1190,37 +1879,76 @@ impl ContentTab {
                 .find(|fk| fk.column_name == col_info.name)
                 .cloned();
             let has_fk = fk_opt.is_some();
-            let (cell_box, entry, ref_btn_opt) =
-                self.create_spreadsheet_cell(&database, &val, true, fk_opt.as_ref());
+            let is_long_text = col_info.is_long_text();
+            let (cell_box, entry, ref_btn_opt, long_text_btn_opt) = self.create_spreadsheet_cell(
+                &database,
+                &val,
+                true,
+                is_long_text,
+                fk_opt.as_ref(),
+            );
             cell_box.add_css_class("cell-dirty");
 
-            let tab_clone = self.clone();
-            let col_name = col_info.name.clone();
-            entry.connect_changed(move |e| {
-                let new_val = DbValue::from_editor_str(&e.text());
-                if let (Some(btn), Some(fk)) = (&ref_btn_opt, &fk_opt) {
-                    Self::update_ref_button_state(btn, fk, &new_val);
-                }
-                if new_val.is_null() {
-                    e.add_css_class("cell-null");
-                } else {
-                    e.remove_css_class("cell-null");
-                }
-                if let Some(row_map) = tab_clone.draft_rows.borrow_mut().get_mut(draft_idx) {
-                    row_map.insert(col_name.clone(), new_val);
-                }
-            });
+            if is_long_text {
+                let initial_val = col_info
+                    .default_value
+                    .as_ref()
+                    .map(|d| DbValue::Text(d.clone()))
+                    .unwrap_or(DbValue::Null);
+                let target = LongTextPanelTarget {
+                    kind: LongTextTargetKind::Draft {
+                        draft_idx,
+                        initial_val,
+                    },
+                    col_info: col_info.clone(),
+                    cell_box: cell_box.clone(),
+                    cell_entry: entry.clone(),
+                    ref_btn_opt,
+                    fk_opt,
+                };
+                self.attach_long_text_cell_handlers(target, long_text_btn_opt);
+            } else {
+                let tab_clone = self.clone();
+                let col_name = col_info.name.clone();
+                entry.connect_changed(move |e| {
+                    let new_val = DbValue::from_editor_str(&e.text());
+                    if let (Some(btn), Some(fk)) = (&ref_btn_opt, &fk_opt) {
+                        Self::update_ref_button_state(btn, fk, &new_val);
+                    }
+                    if new_val.is_null() {
+                        e.add_css_class("cell-null");
+                    } else {
+                        e.remove_css_class("cell-null");
+                    }
+                    if let Some(row_map) = tab_clone.draft_rows.borrow_mut().get_mut(draft_idx) {
+                        row_map.insert(col_name.clone(), new_val);
+                    }
+                });
+            }
 
             self.grid
                 .attach(&cell_box, (col_idx + 1) as i32, grid_row, 1, 1);
 
-            let txt = val.display_text();
+            let preview_cow;
+            let txt = if is_long_text {
+                preview_cow = format_long_text_preview(&val);
+                preview_cow.as_str()
+            } else {
+                val.display_text()
+            };
             let fk_extra = if has_fk && !val.is_null() && !txt.is_empty() {
                 FK_BTN_EXTRA_WIDTH
             } else {
                 0
             };
-            let cell_w = Self::measure_single_line_text(&entry, txt) + CELL_EXTRA_PADDING + fk_extra;
+            let long_text_extra = if is_long_text { FK_BTN_EXTRA_WIDTH } else { 0 };
+            let raw_cell_w =
+                Self::measure_single_line_text(&entry, txt) + CELL_EXTRA_PADDING + fk_extra + long_text_extra;
+            let cell_w = if is_long_text {
+                raw_cell_w.min(MAX_LONG_TEXT_AUTO_COL_WIDTH)
+            } else {
+                raw_cell_w
+            };
             if let Some(nat_w) = self.natural_col_widths.borrow_mut().get_mut(col_idx) {
                 *nat_w = (*nat_w).max(cell_w);
             }
@@ -1229,7 +1957,9 @@ impl ContentTab {
                 let e_clone = entry.clone();
                 gtk::glib::idle_add_local_once(move || {
                     e_clone.grab_focus();
-                    e_clone.select_region(0, -1);
+                    if !is_long_text {
+                        e_clone.select_region(0, -1);
+                    }
                 });
             }
         }
@@ -1528,9 +2258,39 @@ fn compute_auto_column_widths(
     widths
 }
 
+fn format_long_text_preview(val: &DbValue) -> String {
+    match val {
+        DbValue::Null => "NULL".to_string(),
+        DbValue::Text(s) => {
+            let mut out = String::with_capacity(s.len().min(MAX_MEASURE_CHARS));
+            let mut chars = s.chars().peekable();
+            let mut count = 0;
+            while let Some(c) = chars.next() {
+                if count >= MAX_MEASURE_CHARS {
+                    out.push('…');
+                    break;
+                }
+                if c == '\r' {
+                    if chars.peek() == Some(&'\n') {
+                        let _ = chars.next();
+                    }
+                    out.push_str(" ↵ ");
+                } else if c == '\n' {
+                    out.push_str(" ↵ ");
+                } else {
+                    out.push(c);
+                }
+                count += 1;
+            }
+            out
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::models::is_long_text_data_type;
 
     #[test]
     fn test_columns_show_full_content_when_available_width_allows() {
@@ -1563,6 +2323,39 @@ mod tests {
         let widths = compute_auto_column_widths(&natural, &manual, 700);
         assert_eq!(widths[1], 120);
         assert_eq!(widths[2], 400);
+    }
+
+    #[test]
+    fn test_is_long_text_data_type_detection() {
+        assert!(is_long_text_data_type("text"));
+        assert!(is_long_text_data_type("TEXT"));
+        assert!(is_long_text_data_type("tinytext"));
+        assert!(is_long_text_data_type("mediumtext"));
+        assert!(is_long_text_data_type("LONGTEXT"));
+        assert!(is_long_text_data_type("citext"));
+        assert!(is_long_text_data_type("clob"));
+        assert!(is_long_text_data_type("json"));
+        assert!(is_long_text_data_type("jsonb"));
+        assert!(is_long_text_data_type("xml"));
+        assert!(is_long_text_data_type("varchar"));
+        assert!(is_long_text_data_type("varchar(500)"));
+        assert!(is_long_text_data_type("VARCHAR(MAX)"));
+
+        assert!(!is_long_text_data_type("int"));
+        assert!(!is_long_text_data_type("bigint(20)"));
+        assert!(!is_long_text_data_type("varchar(255)"));
+        assert!(!is_long_text_data_type("varchar(64)"));
+        assert!(!is_long_text_data_type("boolean"));
+        assert!(!is_long_text_data_type("timestamp"));
+    }
+
+    #[test]
+    fn test_format_long_text_preview_renders_single_line() {
+        assert_eq!(format_long_text_preview(&DbValue::Null), "NULL");
+        assert_eq!(
+            format_long_text_preview(&DbValue::Text("first\nsecond\r\nthird".to_string())),
+            "first ↵ second ↵ third"
+        );
     }
 }
 
