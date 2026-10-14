@@ -1,0 +1,1099 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DBased — Native GTK4 &amp; Libadwaita Database Client for Linux</title>
+  <meta
+    name="description"
+    content="A fast, native Linux GUI database client for PostgreSQL and MySQL/MariaDB built with Rust, GTK4, Libadwaita, and GtkSourceView 5. Featuring built-in SSH bastion tunneling, foreign-key navigation, and Vim-enabled SQL &amp; JSONB editors."
+  />
+  <meta name="theme-color" content="#3584e4" />
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="DBased — Native GTK4 &amp; Libadwaita Database Client" />
+  <meta
+    property="og:description"
+    content="Lightweight Rust, GTK4 &amp; Libadwaita database client for PostgreSQL and MySQL/MariaDB with SSH bastion tunneling, foreign-key quick jumps, and Vim-powered SQL &amp; JSONB editors."
+  />
+  <meta property="og:image" content="https://raw.githubusercontent.com/tsndr/dbased/main/assets/content.png" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <link rel="icon" type="image/svg+xml" href="icon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap"
+    rel="stylesheet"
+  />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- Reusable SVG Definitions (App Icon) -->
+  <svg width="0" height="0" style="position:absolute;visibility:hidden" aria-hidden="true">
+    <defs>
+      <linearGradient id="db_bg_shadow" x1="12" y1="64" x2="116" y2="64" gradientUnits="userSpaceOnUse">
+        <stop offset="0" stop-color="#0f172a"/>
+        <stop offset="0.06" stop-color="#1e293b"/>
+        <stop offset="0.94" stop-color="#1e293b"/>
+        <stop offset="1" stop-color="#0f172a"/>
+      </linearGradient>
+      <linearGradient id="db_bg_main" x1="64" y1="10" x2="64" y2="112" gradientUnits="userSpaceOnUse">
+        <stop offset="0" stop-color="#273659"/>
+        <stop offset="1" stop-color="#162038"/>
+      </linearGradient>
+      <linearGradient id="db_bg_border" x1="64" y1="10" x2="64" y2="112" gradientUnits="userSpaceOnUse">
+        <stop offset="0" stop-color="#ffffff" stop-opacity="0.22"/>
+        <stop offset="1" stop-color="#ffffff" stop-opacity="0.04"/>
+      </linearGradient>
+      <linearGradient id="db_cyl_body" x1="28" y1="0" x2="88" y2="0" gradientUnits="userSpaceOnUse">
+        <stop offset="0" stop-color="#3584e4"/>
+        <stop offset="0.35" stop-color="#62a0ea"/>
+        <stop offset="0.75" stop-color="#3584e4"/>
+        <stop offset="1" stop-color="#1c71d8"/>
+      </linearGradient>
+      <linearGradient id="db_cyl_top" x1="58" y1="22" x2="58" y2="42" gradientUnits="userSpaceOnUse">
+        <stop offset="0" stop-color="#99c1f1"/>
+        <stop offset="1" stop-color="#62a0ea"/>
+      </linearGradient>
+      <linearGradient id="db_cyl_mid" x1="58" y1="44" x2="58" y2="64" gradientUnits="userSpaceOnUse">
+        <stop offset="0" stop-color="#78aeed"/>
+        <stop offset="1" stop-color="#3584e4"/>
+      </linearGradient>
+      <linearGradient id="db_card_bg" x1="82" y1="62" x2="82" y2="104" gradientUnits="userSpaceOnUse">
+        <stop offset="0" stop-color="#f6f5f4"/>
+        <stop offset="1" stop-color="#deddda"/>
+      </linearGradient>
+      <linearGradient id="db_card_header" x1="60" y1="62" x2="104" y2="62" gradientUnits="userSpaceOnUse">
+        <stop offset="0" stop-color="#2ec27e"/>
+        <stop offset="1" stop-color="#26a269"/>
+      </linearGradient>
+
+      <symbol id="dbased-app-logo" viewBox="0 0 128 128">
+        <rect x="12" y="16" width="104" height="102" rx="24" fill="url(#db_bg_shadow)"/>
+        <rect x="12" y="10" width="104" height="102" rx="24" fill="url(#db_bg_main)"/>
+        <rect x="13" y="11" width="102" height="100" rx="23" stroke="url(#db_bg_border)" stroke-width="2" fill="none"/>
+        <g stroke="#ffffff" stroke-opacity="0.05" stroke-width="1">
+          <line x1="12" y1="36" x2="116" y2="36"/>
+          <line x1="12" y1="61" x2="116" y2="61"/>
+          <line x1="12" y1="86" x2="116" y2="86"/>
+          <line x1="38" y1="10" x2="38" y2="112"/>
+          <line x1="64" y1="10" x2="64" y2="112"/>
+          <line x1="90" y1="10" x2="90" y2="112"/>
+        </g>
+        <ellipse cx="56" cy="91" rx="31" ry="11" fill="#090d16" fill-opacity="0.55"/>
+        <path d="M26 67V83C26 88.5228 39.4315 93 56 93C72.5685 93 86 88.5228 86 83V67H26Z" fill="url(#db_cyl_body)"/>
+        <ellipse cx="56" cy="67" rx="30" ry="10" fill="url(#db_cyl_mid)"/>
+        <circle cx="38" cy="80" r="2.5" fill="#8ff0a4"/>
+        <rect x="44" y="78.5" width="16" height="3" rx="1.5" fill="#ffffff" fill-opacity="0.45"/>
+        <path d="M26 49V64C26 69.5228 39.4315 74 56 74C72.5685 74 86 69.5228 86 64V49H26Z" fill="url(#db_cyl_body)"/>
+        <path d="M26 64C26 69.5228 39.4315 74 56 74C72.5685 74 86 69.5228 86 64" stroke="#162038" stroke-width="2.5" fill="none"/>
+        <ellipse cx="56" cy="49" rx="30" ry="10" fill="url(#db_cyl_mid)"/>
+        <circle cx="38" cy="61" r="2.5" fill="#8ff0a4"/>
+        <rect x="44" y="59.5" width="20" height="3" rx="1.5" fill="#ffffff" fill-opacity="0.55"/>
+        <path d="M26 31V46C26 51.5228 39.4315 56 56 56C72.5685 56 86 51.5228 86 46V31H26Z" fill="url(#db_cyl_body)"/>
+        <path d="M26 46C26 51.5228 39.4315 56 56 56C72.5685 56 86 51.5228 86 46" stroke="#162038" stroke-width="2.5" fill="none"/>
+        <ellipse cx="56" cy="31" rx="30" ry="10" fill="url(#db_cyl_top)"/>
+        <ellipse cx="56" cy="31" rx="28.5" ry="8.5" stroke="#ffffff" stroke-opacity="0.35" stroke-width="1.2" fill="none"/>
+        <circle cx="38" cy="43" r="2.5" fill="#8ff0a4"/>
+        <rect x="44" y="41.5" width="24" height="3" rx="1.5" fill="#ffffff" fill-opacity="0.65"/>
+        <rect x="58" y="62" width="48" height="44" rx="10" fill="#090d16" fill-opacity="0.5"/>
+        <rect x="58" y="59" width="48" height="44" rx="10" fill="url(#db_card_bg)"/>
+        <path d="M58 69C58 63.4772 62.4772 59 68 59H96C101.523 59 106 63.4772 106 69V71H58V69Z" fill="url(#db_card_header)"/>
+        <circle cx="65.5" cy="65" r="2" fill="#ffffff" fill-opacity="0.85"/>
+        <circle cx="72" cy="65" r="2" fill="#ffffff" fill-opacity="0.85"/>
+        <rect x="78" y="63.5" width="20" height="3" rx="1.5" fill="#ffffff" fill-opacity="0.85"/>
+        <line x1="58" y1="81" x2="106" y2="81" stroke="#c0bfbc" stroke-width="1.5"/>
+        <line x1="58" y1="91" x2="106" y2="91" stroke="#c0bfbc" stroke-width="1.5"/>
+        <line x1="76" y1="71" x2="76" y2="103" stroke="#c0bfbc" stroke-width="1.5"/>
+        <rect x="63" y="74.5" width="9" height="3.5" rx="1.5" fill="#3584e4"/>
+        <rect x="80" y="74.5" width="19" height="3.5" rx="1.5" fill="#5e5c64"/>
+        <rect x="63" y="84.5" width="9" height="3.5" rx="1.5" fill="#3584e4"/>
+        <rect x="80" y="84.5" width="14" height="3.5" rx="1.5" fill="#5e5c64"/>
+        <rect x="63" y="94.5" width="9" height="3.5" rx="1.5" fill="#3584e4"/>
+        <rect x="80" y="94.5" width="21" height="3.5" rx="1.5" fill="#2ec27e"/>
+      </symbol>
+    </defs>
+  </svg>
+
+  <!-- Sticky GNOME Headerbar -->
+  <header class="site-header">
+    <div class="container header-inner">
+      <a href="#" class="brand" aria-label="DBased Home">
+        <svg class="brand-icon" aria-hidden="true"><use href="#dbased-app-logo"></use></svg>
+        <span>DBased</span>
+        <span class="brand-version">v0.1.0</span>
+      </a>
+
+      <nav class="header-nav" aria-label="Primary Navigation">
+        <a href="#workspace" class="nav-link">Workspace</a>
+        <a href="#features" class="nav-link">Features</a>
+        <a href="#workflows" class="nav-link">Vim &amp; SQL</a>
+        <a href="#installation" class="nav-link">Installation</a>
+        <a href="#shortcuts" class="nav-link">Shortcuts</a>
+        <a href="#security" class="nav-link">Security</a>
+      </nav>
+
+      <div class="header-actions">
+        <a
+          href="https://github.com/tsndr/dbased"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="btn btn-secondary btn-sm"
+        >
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M12 0.5C5.37 0.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.2 11.39.6.11.82-.26.82-.58v-2.03c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5 1 .11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.12-.3-.54-1.52.12-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.02 0c2.28-1.55 3.29-1.23 3.29-1.23.66 1.66.24 2.88.12 3.18.77.84 1.24 1.91 1.24 3.22 0 4.61-2.81 5.63-5.48 5.92.43.37.81 1.1.81 2.22v3.29c0 .32.21.7.82.58C20.56 22.3 24 17.8 24 12.5 24 5.87 18.63 0.5 12 0.5z"/>
+          </svg>
+          <span>GitHub</span>
+        </a>
+        <a href="#installation" class="btn btn-primary btn-sm">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" y1="15" x2="12" y2="3" />
+          </svg>
+          <span>Install</span>
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <!-- Hero Section -->
+    <section class="hero">
+      <div class="container">
+        <div class="hero-badges">
+          <span class="pill">
+            <span class="pill-dot"></span>
+            GTK4 &amp; Libadwaita
+          </span>
+          <span class="pill pill-rust">Rust 2024 + Tokio + SQLx</span>
+          <span class="pill pill-vim">GtkSourceView 5 Vim Modal</span>
+          <span class="pill">PostgreSQL &amp; MySQL / MariaDB</span>
+        </div>
+
+        <div class="hero-identity">
+          <svg class="hero-app-icon" aria-label="DBased Application Icon">
+            <use href="#dbased-app-logo"></use>
+          </svg>
+          <h1 class="hero-title">
+            Native Linux Database Client.<br />
+            <span class="hero-title-accent">Built for Speed, GNOME &amp; Vim.</span>
+          </h1>
+        </div>
+
+        <p class="hero-subtitle">
+          <strong>DBased</strong> is a lightweight, native GTK4 &amp; Libadwaita client for
+          <strong>PostgreSQL</strong> and <strong>MySQL / MariaDB</strong>. Zero Electron bloat—just an
+          async <code>sqlx</code> spreadsheet grid, built-in <code>russh</code> bastion tunneling,
+          foreign-key quick jumps, and Vim-enabled SQL &amp; <code>JSONB</code> editors.
+        </p>
+
+        <div class="hero-cta-row">
+          <a href="#installation" class="btn btn-primary btn-lg">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" y1="15" x2="12" y2="3" />
+            </svg>
+            <span>Get Packages (.deb, .rpm, Arch, Flatpak, AppImage)</span>
+          </a>
+          <a
+            href="https://github.com/tsndr/dbased/releases/latest"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="btn btn-secondary btn-lg"
+          >
+            <span>Latest Release</span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M7 17L17 7" />
+              <polyline points="7 7 17 7 17 17" />
+            </svg>
+          </a>
+        </div>
+
+        <div class="hero-quick-cmd">
+          <span class="cmd-prompt">$</span>
+          <code>git clone https://github.com/tsndr/dbased.git &amp;&amp; cd dbased &amp;&amp; make install-user</code>
+          <button
+            type="button"
+            class="copy-icon-btn"
+            data-copy="git clone https://github.com/tsndr/dbased.git && cd dbased && make install-user"
+            aria-label="Copy build command"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+            <span class="copy-label">Copy</span>
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Interactive Libadwaita Workspace Showcase -->
+    <section id="workspace" class="showcase-section">
+      <div class="container">
+        <div class="adw-switcher-bar">
+          <div class="adw-view-switcher" role="tablist" aria-label="DBased Workspace Views">
+            <button
+              type="button"
+              role="tab"
+              aria-selected="true"
+              class="adw-tab-btn active"
+              data-view="content"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="3" y="3" width="18" height="18" rx="2" />
+                <line x1="3" y1="9" x2="21" y2="9" />
+                <line x1="3" y1="15" x2="21" y2="15" />
+                <line x1="9" y1="9" x2="9" y2="21" />
+              </svg>
+              <span>Content &amp; JSONB</span>
+              <span class="tab-key">1</span>
+            </button>
+
+            <button
+              type="button"
+              role="tab"
+              aria-selected="false"
+              class="adw-tab-btn"
+              data-view="query"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <polyline points="4 17 10 11 4 5" />
+                <line x1="12" y1="19" x2="20" y2="19" />
+              </svg>
+              <span>SQL Query (Vim)</span>
+              <span class="tab-key">2</span>
+            </button>
+
+            <button
+              type="button"
+              role="tab"
+              aria-selected="false"
+              class="adw-tab-btn"
+              data-view="structure"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <line x1="8" y1="6" x2="21" y2="6" />
+                <line x1="8" y1="12" x2="21" y2="12" />
+                <line x1="8" y1="18" x2="21" y2="18" />
+                <line x1="3" y1="6" x2="3.01" y2="6" />
+                <line x1="3" y1="12" x2="3.01" y2="12" />
+                <line x1="3" y1="18" x2="3.01" y2="18" />
+              </svg>
+              <span>Table Structure</span>
+              <span class="tab-key">3</span>
+            </button>
+
+            <button
+              type="button"
+              role="tab"
+              aria-selected="false"
+              class="adw-tab-btn"
+              data-view="relations"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="18" cy="5" r="3" />
+                <circle cx="6" cy="12" r="3" />
+                <circle cx="18" cy="19" r="3" />
+                <line x1="8.59" y1="13.51" x2="15.42" y2="17.49" />
+                <line x1="15.41" y1="6.51" x2="8.59" y2="10.49" />
+              </svg>
+              <span>FK Relations</span>
+              <span class="tab-key">4</span>
+            </button>
+
+            <button
+              type="button"
+              role="tab"
+              aria-selected="false"
+              class="adw-tab-btn"
+              data-view="connection"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+              </svg>
+              <span>Connection &amp; SSH</span>
+              <span class="tab-key">5</span>
+            </button>
+          </div>
+        </div>
+
+        <div class="showcase-window-wrap">
+          <div class="showcase-glow" aria-hidden="true"></div>
+          <div id="showcase-frame" class="showcase-frame" title="Click to inspect full-resolution screenshot">
+            <img
+              id="showcase-img"
+              class="showcase-img"
+              src="assets/content.png"
+              onerror="if(!this.dataset.p){this.dataset.p=1;this.src='../assets/content.png';}else if(!this.dataset.r){this.dataset.r=1;this.src='https://raw.githubusercontent.com/tsndr/dbased/main/assets/content.png';}"
+              alt="DBased Table Content View and Multiline JSONB Vim Editor"
+              width="1240"
+              height="800"
+            />
+            <span class="showcase-zoom-hint">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="11" cy="11" r="8"></circle>
+                <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                <line x1="11" y1="8" x2="11" y2="14"></line>
+                <line x1="8" y1="11" x2="14" y2="11"></line>
+              </svg>
+              Click image to enlarge · Press 1–5 to switch tabs
+            </span>
+          </div>
+
+          <div class="showcase-caption-card">
+            <div class="caption-main">
+              <div class="caption-title-row">
+                <span id="caption-badge" class="caption-badge">Content View</span>
+                <h2 id="caption-title" class="caption-title">
+                  Spreadsheet Data Grid &amp; Multiline JSONB Vim Inspector
+                </h2>
+              </div>
+              <p id="caption-desc" class="caption-desc">
+                Browse and filter rows at native speed, edit cells inline with transactional batch commits, jump across foreign keys (&gt;), and inspect JSON/JSONB/XML/TEXT columns in a side-by-side GtkSourceView 5 Vim panel.
+              </p>
+            </div>
+            <div id="caption-shortcuts" class="caption-shortcuts">
+              <span class="shortcut-chip"><kbd>Ctrl</kbd><span>+</span><kbd>S</kbd> <span>Commit batch edits</span></span>
+              <span class="shortcut-chip"><kbd>:w</kbd> <span>Stage JSONB cell</span></span>
+              <span class="shortcut-chip"><kbd>:wq</kbd> <span>Stage &amp; close panel</span></span>
+              <span class="shortcut-chip"><kbd>Alt</kbd><span>+</span><kbd>←</kbd> <span>FK jump back</span></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Core Features Bento Grid -->
+    <section id="features" class="section">
+      <div class="container">
+        <div class="section-header">
+          <span class="section-eyebrow">Engineered in Rust</span>
+          <h2 class="section-title">Everything you need in a database workspace. Zero webview lag.</h2>
+          <p class="section-subtitle">
+            Designed around GNOME Human Interface Guidelines and keyboard-first workflows, DBased runs queries and SSH tunnels on a dedicated Tokio worker pool so the UI stays locked at native frame rates.
+          </p>
+        </div>
+
+        <div class="bento-grid">
+          <!-- Feature 1 -->
+          <article class="feature-card span-2">
+            <div class="feature-icon-wrap">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="3" y="3" width="18" height="18" rx="2" />
+                <path d="M3 9h18" />
+                <path d="M9 21V9" />
+              </svg>
+            </div>
+            <h3 class="feature-title">Interactive Spreadsheet Grid &amp; Foreign Key Quick-Jumps</h3>
+            <p class="feature-desc">
+              Auto-fitted and mouse-draggable resizable columns, single-click column sorting (<code>ASC</code> / <code>DESC</code>), inline cell editing with dirty-state highlighting, row insertion, and batch checkbox deletion. Click the <code>&gt;</code> button inside any foreign-key cell to jump directly to the referenced parent row—complete with full browser-style Back/Forward history via <code>Alt+Left</code>, <code>Alt+Right</code>, or mouse side buttons.
+            </p>
+            <div class="feature-tags">
+              <span class="tech-tag">Transactional Ctrl+S Batch Commit</span>
+              <span class="tech-tag">FK Navigation History</span>
+              <span class="tech-tag">CSV &amp; JSON Export</span>
+              <span class="tech-tag">Resizable Columns</span>
+            </div>
+          </article>
+
+          <!-- Feature 2 -->
+          <article class="feature-card">
+            <div class="feature-icon-wrap green">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <polyline points="4 17 10 11 4 5" />
+                <line x1="12" y1="19" x2="20" y2="19" />
+              </svg>
+            </div>
+            <h3 class="feature-title">Dual Vim-Powered Editors</h3>
+            <p class="feature-desc">
+              First-class <code>GtkSourceView 5</code> Vim emulation in both the <strong>SQL Query Editor</strong> and the side-by-side <strong>Multiline Cell Inspector</strong> for <code>JSON</code>, <code>JSONB</code>, <code>XML</code>, and <code>TEXT</code> payloads. Use <code>:w</code>, <code>:q</code>, <code>:wq</code>, and <code>:r</code> without leaving the home row.
+            </p>
+            <div class="feature-tags">
+              <span class="tech-tag">NORMAL / INSERT / VISUAL</span>
+              <span class="tech-tag">GtkSourceView 5.10</span>
+            </div>
+          </article>
+
+          <!-- Feature 3 -->
+          <article class="feature-card">
+            <div class="feature-icon-wrap">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+              </svg>
+            </div>
+            <h3 class="feature-title">Built-in SSH Bastion Tunneling</h3>
+            <p class="feature-desc">
+              Connect through encrypted SSH jump hosts directly inside DBased without external terminal wrappers. Powered by pure-Rust <code>russh</code> with support for both <strong>Password</strong> and <strong>Private Key</strong> (with optional key passphrase) authentication.
+            </p>
+            <div class="feature-tags">
+              <span class="tech-tag">russh 0.49</span>
+              <span class="tech-tag">Ed25519 / RSA Keys</span>
+              <span class="tech-tag">Port Forwarding</span>
+            </div>
+          </article>
+
+          <!-- Feature 4 -->
+          <article class="feature-card">
+            <div class="feature-icon-wrap amber">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <line x1="8" y1="6" x2="21" y2="6" />
+                <line x1="8" y1="12" x2="21" y2="12" />
+                <line x1="8" y1="18" x2="21" y2="18" />
+                <circle cx="4" cy="6" r="1" />
+                <circle cx="4" cy="12" r="1" />
+                <circle cx="4" cy="18" r="1" />
+              </svg>
+            </div>
+            <h3 class="feature-title">Drag-and-Drop Column Reordering</h3>
+            <p class="feature-desc">
+              Add, modify, or drop columns with guided dialogs, and drag rows to reorder table columns—using native <code>ALTER TABLE ... MODIFY ... AFTER</code> on MySQL/MariaDB and a transactional table rebuild preserving foreign keys, indexes, sequences, and views on PostgreSQL.
+            </p>
+            <div class="feature-tags">
+              <span class="tech-tag">Schema DDL</span>
+              <span class="tech-tag">PG Transactional Rebuild</span>
+            </div>
+          </article>
+
+          <!-- Feature 5 -->
+          <article class="feature-card">
+            <div class="feature-icon-wrap green">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <ellipse cx="12" cy="5" rx="9" ry="3" />
+                <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
+                <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
+              </svg>
+            </div>
+            <h3 class="feature-title">Async PostgreSQL &amp; MySQL Drivers</h3>
+            <p class="feature-desc">
+              Powered by <code>sqlx</code> with <code>runtime-tokio-rustls</code> and native support for <code>uuid</code>, <code>chrono</code> timestamps, <code>rust_decimal</code> numeric precision, database views, and instant <code>postgres://</code> or <code>mysql://</code> URL quick-connect.
+            </p>
+            <div class="feature-tags">
+              <span class="tech-tag">sqlx 0.8</span>
+              <span class="tech-tag">tokio async</span>
+              <span class="tech-tag">URL Quick-Paste</span>
+            </div>
+          </article>
+        </div>
+
+        <!-- Dual Workflow Showcase -->
+        <div id="workflows" class="workflow-split">
+          <div class="terminal-card">
+            <div class="terminal-header">
+              <span>SQL Query Editor &amp; Visual Selection Execution</span>
+              <span class="terminal-header-badge">GtkSourceView 5 · Vim</span>
+            </div>
+            <pre class="terminal-body"><code><span class="sql-comment">-- Execute full buffer or active VISUAL selection (Ctrl+Enter or :r)</span>
+<span class="sql-kw">SELECT</span>
+  c.email,
+  c.full_name,
+  <span class="sql-fn">COUNT</span>(o.id) <span class="sql-kw">AS</span> total_orders,
+  <span class="sql-fn">SUM</span>(o.total_eur) <span class="sql-kw">AS</span> lifetime_revenue_eur
+<span class="sql-kw">FROM</span> customers c
+<span class="sql-kw">JOIN</span> orders o <span class="sql-kw">ON</span> o.customer_id = c.id
+<span class="sql-kw">WHERE</span> o.status <span class="sql-kw">IN</span> (<span class="sql-str">'shipped'</span>, <span class="sql-str">'delivered'</span>)
+<span class="sql-kw">GROUP BY</span> c.id, c.email, c.full_name
+<span class="sql-kw">ORDER BY</span> lifetime_revenue_eur <span class="sql-kw">DESC</span>
+<span class="sql-kw">LIMIT</span> <span class="sql-num">6</span>;</code></pre>
+            <div class="vim-statusbar">
+              <span class="vim-mode-pill">-- NORMAL --</span>
+              <span>Query Results — 6 row(s) returned in 4 ms · :r run · :w save</span>
+            </div>
+          </div>
+
+          <div class="terminal-card">
+            <div class="terminal-header">
+              <span>Dual-Mode Content Filter Bar</span>
+              <span class="terminal-header-badge">Free-Text &amp; Raw WHERE</span>
+            </div>
+            <pre class="terminal-body"><code><span class="sql-comment">-- Mode 1: Type any search term to filter across all columns</span>
+<span class="sql-comment">-- Automatically expands to CAST(col AS TEXT) ILIKE '%Berlin%'</span>
+Berlin
+
+<span class="sql-comment">-- Mode 2: Prefix with WHERE for custom SQL predicates</span>
+<span class="sql-kw">WHERE</span> total_eur &gt; <span class="sql-num">100</span> <span class="sql-kw">AND</span> status = <span class="sql-str">'shipped'</span>
+
+<span class="sql-comment">-- Side-by-Side JSONB Cell Inspector (:wq to stage &amp; close)</span>
+{
+  <span class="sql-fn">"carrier"</span>: <span class="sql-str">"DHL Express"</span>,
+  <span class="sql-fn">"priority"</span>: <span class="sql-str">"express_24h"</span>,
+  <span class="sql-fn">"insured"</span>: <span class="sql-kw">true</span>
+}</code></pre>
+            <div class="vim-statusbar">
+              <span class="vim-mode-pill">:wq</span>
+              <span>Stages cell as dirty · Commit all staged rows in a transaction with Ctrl+S</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Installation Section -->
+    <section id="installation" class="section">
+      <div class="container">
+        <div class="section-header">
+          <span class="section-eyebrow">Installation &amp; Packages</span>
+          <h2 class="section-title">Native packages for every Linux distribution.</h2>
+          <p class="section-subtitle">
+            Download prebuilt release artifacts from GitHub Releases or build directly from source with Cargo and Make.
+          </p>
+        </div>
+
+        <div class="install-box">
+          <div class="distro-tabs" role="tablist" aria-label="Linux Distribution Packages">
+            <button type="button" role="tab" aria-selected="true" class="distro-tab active" data-distro="arch">
+              <span>Arch Linux</span>
+              <span class="ext-badge">.pkg.tar.zst / PKGBUILD</span>
+            </button>
+            <button type="button" role="tab" aria-selected="false" class="distro-tab" data-distro="deb">
+              <span>Debian / Ubuntu</span>
+              <span class="ext-badge">.deb</span>
+            </button>
+            <button type="button" role="tab" aria-selected="false" class="distro-tab" data-distro="rpm">
+              <span>Fedora / RHEL</span>
+              <span class="ext-badge">.rpm</span>
+            </button>
+            <button type="button" role="tab" aria-selected="false" class="distro-tab" data-distro="flatpak">
+              <span>Flatpak</span>
+              <span class="ext-badge">.flatpak</span>
+            </button>
+            <button type="button" role="tab" aria-selected="false" class="distro-tab" data-distro="appimage">
+              <span>AppImage &amp; Tarball</span>
+              <span class="ext-badge">.AppImage / .tar.gz</span>
+            </button>
+            <button type="button" role="tab" aria-selected="false" class="distro-tab" data-distro="source">
+              <span>Build from Source</span>
+              <span class="ext-badge">Cargo / Make</span>
+            </button>
+          </div>
+
+          <!-- Arch Linux Panel -->
+          <div id="distro-arch" class="distro-panel active" role="tabpanel">
+            <div class="distro-panel-grid">
+              <div>
+                <div class="cmd-block">
+                  <div class="cmd-block-header">
+                    <span>Option 1 — Install prebuilt Arch package from Releases</span>
+                    <button
+                      type="button"
+                      class="copy-icon-btn"
+                      data-copy="sudo pacman -U dbased-*-x86_64.pkg.tar.zst"
+                    >
+                      <span class="copy-label">Copy</span>
+                    </button>
+                  </div>
+                  <pre class="cmd-pre"><code>sudo pacman -U dbased-*-x86_64.pkg.tar.zst</code></pre>
+                </div>
+
+                <div class="cmd-block">
+                  <div class="cmd-block-header">
+                    <span>Option 2 — Build &amp; install via included PKGBUILD</span>
+                    <button
+                      type="button"
+                      class="copy-icon-btn"
+                      data-copy="git clone https://github.com/tsndr/dbased.git&#10;cd dbased&#10;make install-arch"
+                    >
+                      <span class="copy-label">Copy</span>
+                    </button>
+                  </div>
+                  <pre class="cmd-pre"><code>git clone https://github.com/tsndr/dbased.git
+cd dbased
+make install-arch   # or: makepkg -sfi</code></pre>
+                </div>
+              </div>
+
+              <div class="distro-info-card">
+                <h4>Arch Linux Package</h4>
+                <p>Built natively with <code>makepkg</code> against system <code>gtk4</code>, <code>libadwaita</code>, and <code>gtksourceview5</code>.</p>
+                <ul class="distro-meta-list">
+                  <li><span>Artifact</span><code>dbased-*-x86_64.pkg.tar.zst</code></li>
+                  <li><span>Architecture</span><code>x86_64, aarch64 (PKGBUILD)</code></li>
+                  <li><span>Runtime Deps</span><code>gtk4, libadwaita, gtksourceview5</code></li>
+                </ul>
+                <a
+                  href="https://github.com/tsndr/dbased/releases/latest"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="btn btn-primary btn-sm"
+                  style="width: 100%"
+                >
+                  Download from GitHub Releases
+                </a>
+              </div>
+            </div>
+          </div>
+
+          <!-- Debian / Ubuntu Panel -->
+          <div id="distro-deb" class="distro-panel" role="tabpanel">
+            <div class="distro-panel-grid">
+              <div>
+                <div class="cmd-block">
+                  <div class="cmd-block-header">
+                    <span>Install Debian / Ubuntu (.deb) package</span>
+                    <button
+                      type="button"
+                      class="copy-icon-btn"
+                      data-copy="sudo apt install ./dbased_*_amd64.deb"
+                    >
+                      <span class="copy-label">Copy</span>
+                    </button>
+                  </div>
+                  <pre class="cmd-pre"><code>sudo apt install ./dbased_*_amd64.deb</code></pre>
+                </div>
+
+                <div class="cmd-block">
+                  <div class="cmd-block-header">
+                    <span>Development libraries (if building from source on Ubuntu / Debian)</span>
+                    <button
+                      type="button"
+                      class="copy-icon-btn"
+                      data-copy="sudo apt install build-essential cargo rustc pkg-config libgtk-4-dev libadwaita-1-dev libgtksourceview-5-dev"
+                    >
+                      <span class="copy-label">Copy</span>
+                    </button>
+                  </div>
+                  <pre class="cmd-pre"><code>sudo apt install build-essential cargo rustc pkg-config \
+  libgtk-4-dev libadwaita-1-dev libgtksourceview-5-dev</code></pre>
+                </div>
+              </div>
+
+              <div class="distro-info-card">
+                <h4>Debian &amp; Ubuntu (.deb)</h4>
+                <p>Packaged with <code>cargo-deb</code> on Ubuntu 24.04 LTS (GTK 4.14, Libadwaita 1.5) with automatic shared library dependency resolution.</p>
+                <ul class="distro-meta-list">
+                  <li><span>Artifact</span><code>dbased_*_amd64.deb</code></li>
+                  <li><span>Section</span><code>database</code></li>
+                  <li><span>Includes</span><code>Binary, .desktop, SVG Icon, AppStream</code></li>
+                </ul>
+                <a
+                  href="https://github.com/tsndr/dbased/releases/latest"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="btn btn-primary btn-sm"
+                  style="width: 100%"
+                >
+                  Download .deb from Releases
+                </a>
+              </div>
+            </div>
+          </div>
+
+          <!-- Fedora / RHEL Panel -->
+          <div id="distro-rpm" class="distro-panel" role="tabpanel">
+            <div class="distro-panel-grid">
+              <div>
+                <div class="cmd-block">
+                  <div class="cmd-block-header">
+                    <span>Install Fedora / RHEL (.rpm) package</span>
+                    <button
+                      type="button"
+                      class="copy-icon-btn"
+                      data-copy="sudo dnf install ./dbased-*.x86_64.rpm"
+                    >
+                      <span class="copy-label">Copy</span>
+                    </button>
+                  </div>
+                  <pre class="cmd-pre"><code>sudo dnf install ./dbased-*.x86_64.rpm</code></pre>
+                </div>
+
+                <div class="cmd-block">
+                  <div class="cmd-block-header">
+                    <span>Development libraries (if building from source on Fedora)</span>
+                    <button
+                      type="button"
+                      class="copy-icon-btn"
+                      data-copy="sudo dnf install cargo rust gtk4-devel libadwaita-devel gtksourceview5-devel"
+                    >
+                      <span class="copy-label">Copy</span>
+                    </button>
+                  </div>
+                  <pre class="cmd-pre"><code>sudo dnf install cargo rust gtk4-devel libadwaita-devel gtksourceview5-devel</code></pre>
+                </div>
+              </div>
+
+              <div class="distro-info-card">
+                <h4>Fedora &amp; RHEL (.rpm)</h4>
+                <p>Built with <code>rpmbuild</code> on Fedora 41 with full desktop launcher, scalable icon, and AppStream metadata integration.</p>
+                <ul class="distro-meta-list">
+                  <li><span>Artifact</span><code>dbased-*-1.x86_64.rpm</code></li>
+                  <li><span>Requires</span><code>gtk4, libadwaita, gtksourceview5</code></li>
+                  <li><span>License</span><code>MIT</code></li>
+                </ul>
+                <a
+                  href="https://github.com/tsndr/dbased/releases/latest"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="btn btn-primary btn-sm"
+                  style="width: 100%"
+                >
+                  Download .rpm from Releases
+                </a>
+              </div>
+            </div>
+          </div>
+
+          <!-- Flatpak Panel -->
+          <div id="distro-flatpak" class="distro-panel" role="tabpanel">
+            <div class="distro-panel-grid">
+              <div>
+                <div class="cmd-block">
+                  <div class="cmd-block-header">
+                    <span>Install single-file Flatpak bundle</span>
+                    <button
+                      type="button"
+                      class="copy-icon-btn"
+                      data-copy="flatpak install --user ./dbased-*-x86_64.flatpak"
+                    >
+                      <span class="copy-label">Copy</span>
+                    </button>
+                  </div>
+                  <pre class="cmd-pre"><code>flatpak install --user ./dbased-*-x86_64.flatpak</code></pre>
+                </div>
+
+                <div class="cmd-block">
+                  <div class="cmd-block-header">
+                    <span>Run via Flatpak</span>
+                    <button
+                      type="button"
+                      class="copy-icon-btn"
+                      data-copy="flatpak run io.github.tsndr.dbased"
+                    >
+                      <span class="copy-label">Copy</span>
+                    </button>
+                  </div>
+                  <pre class="cmd-pre"><code>flatpak run io.github.tsndr.dbased</code></pre>
+                </div>
+              </div>
+
+              <div class="distro-info-card">
+                <h4>Flatpak Bundle</h4>
+                <p>Built against <code>org.gnome.Platform//47</code> with Wayland/X11 sockets, read-only <code>~/.ssh</code> key access, and <code>org.freedesktop.secrets</code> keyring integration.</p>
+                <ul class="distro-meta-list">
+                  <li><span>App ID</span><code>io.github.tsndr.dbased</code></li>
+                  <li><span>Runtime</span><code>org.gnome.Platform // 47</code></li>
+                  <li><span>Manifest</span><code>data/io.github.tsndr.dbased.flatpak.yml</code></li>
+                </ul>
+                <a
+                  href="https://github.com/tsndr/dbased/releases/latest"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="btn btn-primary btn-sm"
+                  style="width: 100%"
+                >
+                  Download .flatpak from Releases
+                </a>
+              </div>
+            </div>
+          </div>
+
+          <!-- AppImage & Tarball Panel -->
+          <div id="distro-appimage" class="distro-panel" role="tabpanel">
+            <div class="distro-panel-grid">
+              <div>
+                <div class="cmd-block">
+                  <div class="cmd-block-header">
+                    <span>Run portable AppImage</span>
+                    <button
+                      type="button"
+                      class="copy-icon-btn"
+                      data-copy="chmod +x dbased-*-x86_64.AppImage &amp;&amp; ./dbased-*-x86_64.AppImage"
+                    >
+                      <span class="copy-label">Copy</span>
+                    </button>
+                  </div>
+                  <pre class="cmd-pre"><code>chmod +x dbased-*-x86_64.AppImage &amp;&amp; ./dbased-*-x86_64.AppImage</code></pre>
+                </div>
+
+                <div class="cmd-block">
+                  <div class="cmd-block-header">
+                    <span>Install from Generic Linux Tarball (.tar.gz)</span>
+                    <button
+                      type="button"
+                      class="copy-icon-btn"
+                      data-copy="tar -xzf dbased-*-linux-x86_64.tar.gz &amp;&amp; cd dbased-* &amp;&amp; sudo make install-files"
+                    >
+                      <span class="copy-label">Copy</span>
+                    </button>
+                  </div>
+                  <pre class="cmd-pre"><code>tar -xzf dbased-*-linux-x86_64.tar.gz &amp;&amp; cd dbased-* &amp;&amp; sudo make install-files</code></pre>
+                </div>
+              </div>
+
+              <div class="distro-info-card">
+                <h4>Portable Linux Formats</h4>
+                <p>Run DBased anywhere without package manager installation using the self-contained GTK4 AppImage, or install the stripped release binary tarball directly.</p>
+                <ul class="distro-meta-list">
+                  <li><span>AppImage</span><code>dbased-*-x86_64.AppImage</code></li>
+                  <li><span>Tarball</span><code>dbased-*-linux-x86_64.tar.gz</code></li>
+                  <li><span>Checksums</span><code>SHA256SUMS included in release</code></li>
+                </ul>
+                <a
+                  href="https://github.com/tsndr/dbased/releases/latest"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="btn btn-primary btn-sm"
+                  style="width: 100%"
+                >
+                  View All Release Assets
+                </a>
+              </div>
+            </div>
+          </div>
+
+          <!-- Build from Source Panel -->
+          <div id="distro-source" class="distro-panel" role="tabpanel">
+            <div class="distro-panel-grid">
+              <div>
+                <div class="cmd-block">
+                  <div class="cmd-block-header">
+                    <span>System-wide installation (/usr/local)</span>
+                    <button
+                      type="button"
+                      class="copy-icon-btn"
+                      data-copy="git clone https://github.com/tsndr/dbased.git&#10;cd dbased&#10;make build&#10;sudo make install"
+                    >
+                      <span class="copy-label">Copy</span>
+                    </button>
+                  </div>
+                  <pre class="cmd-pre"><code>git clone https://github.com/tsndr/dbased.git
+cd dbased
+make build
+sudo make install</code></pre>
+                </div>
+
+                <div class="cmd-block">
+                  <div class="cmd-block-header">
+                    <span>User-local installation (~/.local, no root required)</span>
+                    <button
+                      type="button"
+                      class="copy-icon-btn"
+                      data-copy="make install-user"
+                    >
+                      <span class="copy-label">Copy</span>
+                    </button>
+                  </div>
+                  <pre class="cmd-pre"><code>make install-user   # Uninstall anytime with: make uninstall-user</code></pre>
+                </div>
+              </div>
+
+              <div class="distro-info-card">
+                <h4>Building from Source</h4>
+                <p>Requires a stable Rust toolchain supporting the <strong>Rust 2024 edition</strong> (<code>rustc &gt;= 1.85</code>) along with GTK 4.14+, Libadwaita 1.5+, and GtkSourceView 5.10+ headers.</p>
+                <ul class="distro-meta-list">
+                  <li><span>Edition</span><code>Rust 2024 (rustc &gt;= 1.85)</code></li>
+                  <li><span>Direct Run</span><code>cargo run --release</code></li>
+                  <li><span>Debug Logs</span><code>RUST_LOG=dbased=debug</code></li>
+                </ul>
+                <a
+                  href="https://github.com/tsndr/dbased"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="btn btn-secondary btn-sm"
+                  style="width: 100%"
+                >
+                  Browse Source Repository
+                </a>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Keyboard Shortcuts & Vim Commands -->
+    <section id="shortcuts" class="section">
+      <div class="container">
+        <div class="section-header">
+          <span class="section-eyebrow">Keyboard-Centric Flow</span>
+          <h2 class="section-title">Shortcuts &amp; Vim Command Reference</h2>
+          <p class="section-subtitle">
+            Every core action in DBased—from staging multiline JSONB edits to jumping across foreign keys and running visual SQL selections—is mapped for fast keyboard navigation.
+          </p>
+        </div>
+
+        <div class="shortcuts-grid">
+          <!-- Card 1: Content Grid -->
+          <div class="shortcut-group-card">
+            <div class="shortcut-group-header">
+              <h3>Content Grid &amp; Navigation</h3>
+              <span class="tech-tag">Spreadsheet</span>
+            </div>
+            <ul class="shortcut-list">
+              <li class="shortcut-row">
+                <span class="shortcut-desc">Commit all staged cell edits (transaction)</span>
+                <span class="shortcut-keys"><kbd>Ctrl</kbd><span>+</span><kbd>S</kbd></span>
+              </li>
+              <li class="shortcut-row">
+                <span class="shortcut-desc">Jump to referenced parent row in FK cell</span>
+                <span class="shortcut-keys"><kbd>Click &gt;</kbd></span>
+              </li>
+              <li class="shortcut-row">
+                <span class="shortcut-desc">Navigate back in FK jump history</span>
+                <span class="shortcut-keys"><kbd>Alt</kbd><span>+</span><kbd>Left</kbd></span>
+              </li>
+              <li class="shortcut-row">
+                <span class="shortcut-desc">Navigate forward in FK jump history</span>
+                <span class="shortcut-keys"><kbd>Alt</kbd><span>+</span><kbd>Right</kbd></span>
+              </li>
+              <li class="shortcut-row">
+                <span class="shortcut-desc">Mouse back / forward history buttons</span>
+                <span class="shortcut-keys"><kbd>Mouse Back / Fwd</kbd></span>
+              </li>
+              <li class="shortcut-row">
+                <span class="shortcut-desc">Apply custom SQL predicate in filter bar</span>
+                <span class="shortcut-keys"><kbd>WHERE ...</kbd></span>
+              </li>
+            </ul>
+          </div>
+
+          <!-- Card 2: Multiline JSONB / Text Vim Editor -->
+          <div class="shortcut-group-card">
+            <div class="shortcut-group-header">
+              <h3>Multiline Cell Inspector</h3>
+              <span class="tech-tag">Vim Modal</span>
+            </div>
+            <ul class="shortcut-list">
+              <li class="shortcut-row">
+                <span class="shortcut-desc">Open side-by-side JSON/JSONB/TEXT panel</span>
+                <span class="shortcut-keys"><kbd>Expand Icon</kbd></span>
+              </li>
+              <li class="shortcut-row">
+                <span class="shortcut-desc">Stage buffer edits &amp; mark cell dirty</span>
+                <span class="shortcut-keys"><kbd>:w</kbd><span>/</span><kbd>:write</kbd></span>
+              </li>
+              <li class="shortcut-row">
+                <span class="shortcut-desc">Close multiline editor panel</span>
+                <span class="shortcut-keys"><kbd>:q</kbd><span>/</span><kbd>:quit</kbd></span>
+              </li>
+              <li class="shortcut-row">
+                <span class="shortcut-desc">Stage buffer edits &amp; close panel</span>
+                <span class="shortcut-keys"><kbd>:wq</kbd><span>/</span><kbd>:x</kbd></span>
+              </li>
+              <li class="shortcut-row">
+                <span class="shortcut-desc">Modal editing motions &amp; text objects</span>
+                <span class="shortcut-keys"><kbd>NORMAL</kbd><kbd>VISUAL</kbd></span>
+              </li>
+            </ul>
+          </div>
+
+          <!-- Card 3: SQL Query Editor -->
+          <div class="shortcut-group-card">
+            <div class="shortcut-group-header">
+              <h3>SQL Query Editor</h3>
+              <span class="tech-tag">Vim Modal</span>
+            </div>
+            <ul class="shortcut-list">
+              <li class="shortcut-row">
+                <span class="shortcut-desc">Execute visual selection or full buffer</span>
+                <span class="shortcut-keys"><kbd>Ctrl</kbd><span>+</span><kbd>Enter</kbd></span>
+              </li>
+              <li class="shortcut-row">
+                <span class="shortcut-desc">Execute query from Vim command line</span>
+                <span class="shortcut-keys"><kbd>:r</kbd><span>/</span><kbd>:run</kbd></span>
+              </li>
+              <li class="shortcut-row">
+                <span class="shortcut-desc">Save SQL buffer to <code>.sql</code> file</span>
+                <span class="shortcut-keys"><kbd>:w</kbd><span>/</span><kbd>:write</kbd></span>
+              </li>
+              <li class="shortcut-row">
+                <span class="shortcut-desc">Execute unsaved scratch buffer quickly</span>
+                <span class="shortcut-keys"><kbd>:w</kbd></span>
+              </li>
+              <li class="shortcut-row">
+                <span class="shortcut-desc">Export query result set</span>
+                <span class="shortcut-keys"><kbd>CSV</kbd><span>/</span><kbd>JSON</kbd></span>
+              </li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Security & Configuration -->
+    <section id="security" class="section">
+      <div class="container">
+        <div class="section-header">
+          <span class="section-eyebrow">Configuration &amp; Security</span>
+          <h2 class="section-title">OS Keyring Integration &amp; Clean XDG Storage</h2>
+          <p class="section-subtitle">
+            Connection metadata and sensitive credentials are separated cleanly following Linux desktop standards.
+          </p>
+        </div>
+
+        <div class="arch-grid">
+          <div class="arch-card">
+            <h3>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent-blue-bright)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+              </svg>
+              D-Bus Secret Service Keyring
+            </h3>
+            <p>
+              Database passwords and SSH passphrases are stored securely in your system keyring via the D-Bus Secret Service API (<code>oo7</code>), compatible out of the box with <strong>GNOME Keyring</strong>, <strong>KeePassXC</strong>, and <strong>KWallet</strong>.
+            </p>
+          </div>
+
+          <div class="arch-card">
+            <h3>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent-green-bright)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                <polyline points="14 2 14 8 20 8" />
+              </svg>
+              XDG Bookmarks &amp; 0600 Fallback
+            </h3>
+            <p>
+              Non-sensitive connection profiles live in <code>~/.config/dbased/bookmarks.toml</code>. In headless or minimal setups without a D-Bus Secret Service provider, DBased automatically falls back to <code>~/.config/dbased/.credentials.toml</code> with strict <code>0600</code> permissions.
+            </p>
+          </div>
+
+          <div class="arch-card">
+            <h3>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent-amber)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+              </svg>
+              Lightweight Native Footprint
+            </h3>
+            <p>
+              Compiled to a single native binary (~5 MB package size) with Wayland and X11 support via GTK4 and Libadwaita. Control runtime diagnostics anytime via <code>RUST_LOG=dbased=debug</code>.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Footer -->
+  <footer class="site-footer">
+    <div class="container footer-inner">
+      <div class="footer-brand">
+        <svg width="40" height="40" aria-hidden="true"><use href="#dbased-app-logo"></use></svg>
+        <div class="footer-brand-text">
+          <h4>DBased</h4>
+          <p><code>io.github.tsndr.dbased</code> · Released under the MIT License</p>
+        </div>
+      </div>
+
+      <div class="footer-links">
+        <a href="https://github.com/tsndr/dbased" target="_blank" rel="noopener noreferrer">GitHub Repository</a>
+        <a href="https://github.com/tsndr/dbased/releases" target="_blank" rel="noopener noreferrer">Releases</a>
+        <a href="https://github.com/tsndr/dbased/issues" target="_blank" rel="noopener noreferrer">Issue Tracker</a>
+        <a href="https://github.com/tsndr/dbased/blob/main/PKGBUILD" target="_blank" rel="noopener noreferrer">PKGBUILD</a>
+        <a href="https://github.com/tsndr/dbased/blob/main/data/io.github.tsndr.dbased.flatpak.yml" target="_blank" rel="noopener noreferrer">Flatpak Manifest</a>
+      </div>
+    </div>
+  </footer>
+
+  <!-- Full-Resolution Screenshot Lightbox -->
+  <div id="lightbox" class="lightbox" aria-hidden="true" role="dialog" aria-label="Screenshot Zoom View">
+    <div class="lightbox-content">
+      <button id="lightbox-close" type="button" class="lightbox-close" aria-label="Close enlarged image">&times;</button>
+      <img id="lightbox-img" class="lightbox-img" src="assets/content.png" alt="Enlarged screenshot" />
+    </div>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>
