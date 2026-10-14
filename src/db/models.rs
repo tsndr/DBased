@@ -96,6 +96,38 @@ pub enum ColumnAlterOp {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexInfo {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub is_unique: bool,
+    pub is_primary: bool,
+    pub index_type: String,
+    pub method: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexSpec {
+    pub name: String,
+    pub columns: Vec<String>,
+    pub index_type: String,
+    pub method: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexAlterOp {
+    Add(IndexSpec),
+    Modify {
+        old_name: String,
+        old_is_primary: bool,
+        spec: IndexSpec,
+    },
+    Drop {
+        name: String,
+        is_primary: bool,
+    },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SortDirection {
     Asc,
@@ -246,6 +278,11 @@ pub enum BackendCommand {
         table: String,
         op: ColumnAlterOp,
     },
+    AlterIndex {
+        database: String,
+        table: String,
+        op: IndexAlterOp,
+    },
     FetchTableContent {
         database: String,
         table: String,
@@ -309,6 +346,7 @@ pub enum BackendEvent {
         table: String,
         all_tables: Vec<String>,
         structure: Vec<ColumnInfo>,
+        indexes: Vec<IndexInfo>,
         content: TablePage,
         relations: Vec<ForeignKeyInfo>,
         content_query: ContentQuery,
@@ -317,6 +355,7 @@ pub enum BackendEvent {
         database: String,
         table: String,
         structure: Vec<ColumnInfo>,
+        indexes: Vec<IndexInfo>,
         toast: Option<String>,
     },
     ContentLoaded {

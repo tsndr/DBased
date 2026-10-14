@@ -1,4 +1,6 @@
-use crate::db::models::{BackendCommand, ColumnAlterOp, ColumnInfo, ColumnSpec};
+use crate::db::models::{
+    BackendCommand, ColumnAlterOp, ColumnInfo, ColumnSpec, IndexAlterOp, IndexInfo, IndexSpec,
+};
 use crate::ui::workspace::{build_resizable_header_cell, wrap_resizable_row_cell};
 use adw::prelude::*;
 use async_channel::Sender;
@@ -18,6 +20,18 @@ const STRUCTURE_HEADERS: &[(&str, i32)] = &[
     ("ACTIONS", 96),
 ];
 
+const INDEX_HEADERS: &[(&str, i32)] = &[
+    ("KEY NAME", 220),
+    ("TYPE", 120),
+    ("COLUMNS", 260),
+    ("UNIQUE", 95),
+    ("METHOD", 110),
+    ("ACTIONS", 96),
+];
+
+const INDEX_TYPES: &[&str] = &["INDEX", "UNIQUE", "PRIMARY", "FULLTEXT", "SPATIAL"];
+const INDEX_METHODS: &[&str] = &["Default", "BTREE", "HASH", "GIN", "GIST", "BRIN"];
+
 #[derive(Clone)]
 pub struct StructureTab {
     pub root: gtk::Box,
@@ -25,11 +39,18 @@ pub struct StructureTab {
     header_label: gtk::Label,
     add_btn: gtk::Button,
     refresh_btn: gtk::Button,
+    idx_list_box: gtk::ListBox,
+    idx_header_label: gtk::Label,
+    add_idx_btn: gtk::Button,
+    idx_refresh_btn: gtk::Button,
     current_db: Rc<RefCell<String>>,
     current_table: Rc<RefCell<String>>,
     columns: Rc<RefCell<Vec<ColumnInfo>>>,
+    indexes: Rc<RefCell<Vec<IndexInfo>>>,
     col_widths: Rc<RefCell<Vec<i32>>>,
     row_cells: Rc<RefCell<Vec<Vec<gtk::Box>>>>,
+    idx_col_widths: Rc<RefCell<Vec<i32>>>,
+    idx_row_cells: Rc<RefCell<Vec<Vec<gtk::Box>>>>,
     dragged_from_idx: Rc<RefCell<Option<usize>>>,
     cmd_tx: Sender<BackendCommand>,
 }
@@ -39,6 +60,22 @@ impl StructureTab {
         let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
         root.set_vexpand(true);
         root.set_hexpand(true);
+
+        let paned = gtk::Paned::new(gtk::Orientation::Vertical);
+        paned.set_position(390);
+        paned.set_vexpand(true);
+        paned.set_hexpand(true);
+        paned.set_resize_start_child(true);
+        paned.set_resize_end_child(true);
+        paned.set_shrink_start_child(false);
+        paned.set_shrink_end_child(false);
+
+        // ==========================================
+        // Top Pane: Columns
+        // ==========================================
+        let top_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        top_box.set_vexpand(true);
+        top_box.set_hexpand(true);
 
         // Top toolbar
         let bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -69,8 +106,8 @@ impl StructureTab {
         bar.append(&refresh_btn);
         bar.append(&add_btn);
 
-        root.append(&bar);
-        root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        top_box.append(&bar);
+        top_box.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
 
         let initial_widths: Vec<i32> = STRUCTURE_HEADERS.iter().map(|(_, w)| *w).collect();
         let col_widths = Rc::new(RefCell::new(initial_widths));
@@ -141,13 +178,128 @@ impl StructureTab {
             .child(&col_header)
             .build();
 
-        root.append(&header_scroll);
-        root.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
-        root.append(&scroll);
+        top_box.append(&header_scroll);
+        top_box.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        top_box.append(&scroll);
+
+        // ==========================================
+        // Bottom Pane: Indexes (Sequel Ace style)
+        // ==========================================
+        let bottom_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        bottom_box.set_vexpand(true);
+        bottom_box.set_hexpand(true);
+
+        let idx_bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        idx_bar.set_margin_top(8);
+        idx_bar.set_margin_bottom(8);
+        idx_bar.set_margin_start(16);
+        idx_bar.set_margin_end(16);
+
+        let idx_header_label = gtk::Label::new(Some("Indexes"));
+        idx_header_label.add_css_class("heading");
+        idx_header_label.set_halign(gtk::Align::Start);
+        idx_header_label.set_hexpand(true);
+
+        let idx_hint_lbl = gtk::Label::new(Some("Drag column borders to resize"));
+        idx_hint_lbl.add_css_class("caption");
+        idx_hint_lbl.add_css_class("dim-label");
+
+        let idx_refresh_btn = gtk::Button::from_icon_name("view-refresh-symbolic");
+        idx_refresh_btn.set_tooltip_text(Some("Refresh Indexes"));
+        idx_refresh_btn.set_sensitive(false);
+
+        let add_idx_btn = gtk::Button::with_label("Add Index");
+        add_idx_btn.add_css_class("suggested-action");
+        add_idx_btn.set_sensitive(false);
+
+        idx_bar.append(&idx_header_label);
+        idx_bar.append(&idx_hint_lbl);
+        idx_bar.append(&idx_refresh_btn);
+        idx_bar.append(&add_idx_btn);
+
+        bottom_box.append(&idx_bar);
+        bottom_box.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+
+        let init_idx_widths: Vec<i32> = INDEX_HEADERS.iter().map(|(_, w)| *w).collect();
+        let idx_col_widths = Rc::new(RefCell::new(init_idx_widths));
+        let idx_row_cells: Rc<RefCell<Vec<Vec<gtk::Box>>>> = Rc::new(RefCell::new(Vec::new()));
+
+        let idx_col_header = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        idx_col_header.set_margin_top(8);
+        idx_col_header.set_margin_bottom(8);
+        idx_col_header.set_margin_start(16);
+        idx_col_header.set_margin_end(16);
+
+        for (col_idx, (title, init_w)) in INDEX_HEADERS.iter().enumerate() {
+            let lbl = gtk::Label::new(Some(title));
+            lbl.add_css_class("caption-heading");
+            lbl.add_css_class("dim-label");
+            lbl.set_halign(gtk::Align::Fill);
+            lbl.set_xalign(0.0);
+            lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            lbl.set_max_width_chars(1);
+            lbl.set_margin_start(8);
+            lbl.set_margin_end(4);
+
+            let idx_col_widths_ref = idx_col_widths.clone();
+            let idx_row_cells_ref = idx_row_cells.clone();
+            let hdr_cell = build_resizable_header_cell(
+                &lbl,
+                *init_w,
+                Some("table-header-cell"),
+                move |new_w| {
+                    if let Some(w) = idx_col_widths_ref.borrow_mut().get_mut(col_idx) {
+                        *w = new_w;
+                    }
+                    for row in idx_row_cells_ref.borrow().iter() {
+                        if let Some(cell) = row.get(col_idx) {
+                            cell.set_width_request(new_w);
+                        }
+                    }
+                },
+            );
+            idx_col_header.append(&hdr_cell);
+        }
+
+        let idx_list_box = gtk::ListBox::new();
+        idx_list_box.set_selection_mode(gtk::SelectionMode::None);
+        idx_list_box.add_css_class("boxed-list");
+        idx_list_box.add_css_class("resizable-boxed-list");
+        idx_list_box.set_halign(gtk::Align::Start);
+        idx_list_box.set_margin_top(12);
+        idx_list_box.set_margin_bottom(16);
+        idx_list_box.set_margin_start(16);
+        idx_list_box.set_margin_end(16);
+
+        let idx_scroll = gtk::ScrolledWindow::builder()
+            .vexpand(true)
+            .hexpand(true)
+            .hscrollbar_policy(gtk::PolicyType::Automatic)
+            .vscrollbar_policy(gtk::PolicyType::Automatic)
+            .child(&idx_list_box)
+            .build();
+
+        let idx_header_scroll = gtk::ScrolledWindow::builder()
+            .hexpand(true)
+            .vexpand(false)
+            .hscrollbar_policy(gtk::PolicyType::External)
+            .vscrollbar_policy(gtk::PolicyType::Never)
+            .hadjustment(&idx_scroll.hadjustment())
+            .child(&idx_col_header)
+            .build();
+
+        bottom_box.append(&idx_header_scroll);
+        bottom_box.append(&gtk::Separator::new(gtk::Orientation::Horizontal));
+        bottom_box.append(&idx_scroll);
+
+        paned.set_start_child(Some(&top_box));
+        paned.set_end_child(Some(&bottom_box));
+        root.append(&paned);
 
         let current_db = Rc::new(RefCell::new(String::new()));
         let current_table = Rc::new(RefCell::new(String::new()));
         let columns = Rc::new(RefCell::new(Vec::new()));
+        let indexes = Rc::new(RefCell::new(Vec::new()));
         let dragged_from_idx = Rc::new(RefCell::new(None));
 
         let tab = Self {
@@ -156,21 +308,45 @@ impl StructureTab {
             header_label,
             add_btn: add_btn.clone(),
             refresh_btn: refresh_btn.clone(),
+            idx_list_box,
+            idx_header_label,
+            add_idx_btn: add_idx_btn.clone(),
+            idx_refresh_btn: idx_refresh_btn.clone(),
             current_db: current_db.clone(),
             current_table: current_table.clone(),
             columns,
+            indexes,
             col_widths,
             row_cells,
+            idx_col_widths,
+            idx_row_cells,
             dragged_from_idx,
             cmd_tx: cmd_tx.clone(),
         };
 
-        // Refresh button
+        // Refresh button (top)
         {
             let cmd_tx = cmd_tx.clone();
             let current_db = current_db.clone();
             let current_table = current_table.clone();
             refresh_btn.connect_clicked(move |_| {
+                let db = current_db.borrow().clone();
+                let tbl = current_table.borrow().clone();
+                if !tbl.is_empty() {
+                    let _ = cmd_tx.send_blocking(BackendCommand::RefreshStructure {
+                        database: db,
+                        table: tbl,
+                    });
+                }
+            });
+        }
+
+        // Refresh button (indexes panel)
+        {
+            let cmd_tx = cmd_tx.clone();
+            let current_db = current_db.clone();
+            let current_table = current_table.clone();
+            idx_refresh_btn.connect_clicked(move |_| {
                 let db = current_db.borrow().clone();
                 let tbl = current_table.borrow().clone();
                 if !tbl.is_empty() {
@@ -190,14 +366,30 @@ impl StructureTab {
             });
         }
 
+        // Add Index button
+        {
+            let tab_clone = tab.clone();
+            add_idx_btn.connect_clicked(move |btn| {
+                tab_clone.open_index_dialog(btn.upcast_ref::<gtk::Widget>(), None);
+            });
+        }
+
         tab
     }
 
-    pub fn set_structure(&self, database: &str, table: &str, cols: Vec<ColumnInfo>) {
+    pub fn set_structure(
+        &self,
+        database: &str,
+        table: &str,
+        cols: Vec<ColumnInfo>,
+        idxs: Vec<IndexInfo>,
+    ) {
         *self.current_db.borrow_mut() = database.to_string();
         *self.current_table.borrow_mut() = table.to_string();
         *self.columns.borrow_mut() = cols;
+        *self.indexes.borrow_mut() = idxs;
         self.render_rows();
+        self.render_indexes();
     }
 
     fn render_rows(&self) {
@@ -633,6 +825,578 @@ impl StructureTab {
                     table: table.clone(),
                     op: ColumnAlterOp::Drop {
                         name: col_str.clone(),
+                    },
+                });
+            }
+        });
+
+        alert.present(Some(parent));
+    }
+
+    fn render_indexes(&self) {
+        let table = self.current_table.borrow().clone();
+        let cols = self.columns.borrow().clone();
+        let indexes = self.indexes.borrow().clone();
+
+        if table.is_empty() {
+            self.idx_header_label.set_text("Indexes");
+        } else {
+            self.idx_header_label.set_text(&format!(
+                "Indexes — {} index(es)",
+                indexes.len()
+            ));
+        }
+        self.add_idx_btn
+            .set_sensitive(!table.is_empty() && !cols.is_empty());
+        self.idx_refresh_btn.set_sensitive(!table.is_empty());
+
+        while let Some(child) = self.idx_list_box.first_child() {
+            self.idx_list_box.remove(&child);
+        }
+        self.idx_row_cells.borrow_mut().clear();
+
+        if indexes.is_empty() {
+            if !table.is_empty() {
+                let empty_row = adw::ActionRow::builder()
+                    .title("No indexes defined on this table")
+                    .subtitle("Click 'Add Index' to create a single-column or composite index")
+                    .build();
+                self.idx_list_box.append(&empty_row);
+            }
+            return;
+        }
+
+        let widths = self.idx_col_widths.borrow().clone();
+
+        for idx in indexes {
+            let row_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+            row_box.set_margin_top(8);
+            row_box.set_margin_bottom(8);
+
+            let name_lbl = gtk::Label::new(Some(&idx.name));
+            name_lbl.add_css_class("heading");
+            name_lbl.set_halign(gtk::Align::Fill);
+            name_lbl.set_xalign(0.0);
+            name_lbl.set_hexpand(true);
+            name_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            name_lbl.set_max_width_chars(1);
+            name_lbl.set_tooltip_text(Some(&idx.name));
+
+            let type_lbl = gtk::Label::new(Some(&idx.index_type));
+            type_lbl.add_css_class("monospace");
+            if idx.is_primary {
+                type_lbl.add_css_class("accent");
+                type_lbl.add_css_class("heading");
+            } else if idx.is_unique {
+                type_lbl.add_css_class("accent");
+            } else {
+                type_lbl.add_css_class("dim-label");
+            }
+            type_lbl.set_halign(gtk::Align::Fill);
+            type_lbl.set_xalign(0.0);
+            type_lbl.set_hexpand(true);
+            type_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            type_lbl.set_max_width_chars(1);
+            type_lbl.set_tooltip_text(Some(&idx.index_type));
+
+            let cols_text = idx.columns.join(", ");
+            let cols_lbl = gtk::Label::new(Some(&cols_text));
+            cols_lbl.add_css_class("monospace");
+            cols_lbl.set_halign(gtk::Align::Fill);
+            cols_lbl.set_xalign(0.0);
+            cols_lbl.set_hexpand(true);
+            cols_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            cols_lbl.set_max_width_chars(1);
+            cols_lbl.set_tooltip_text(Some(&cols_text));
+
+            let uniq_lbl = gtk::Label::new(Some(if idx.is_unique { "YES" } else { "NO" }));
+            if idx.is_unique {
+                uniq_lbl.add_css_class("accent");
+            } else {
+                uniq_lbl.add_css_class("dim-label");
+            }
+            uniq_lbl.set_halign(gtk::Align::Fill);
+            uniq_lbl.set_xalign(0.0);
+            uniq_lbl.set_hexpand(true);
+            uniq_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            uniq_lbl.set_max_width_chars(1);
+
+            let method_lbl = gtk::Label::new(Some(&idx.method));
+            method_lbl.add_css_class("monospace");
+            method_lbl.add_css_class("dim-label");
+            method_lbl.set_halign(gtk::Align::Fill);
+            method_lbl.set_xalign(0.0);
+            method_lbl.set_hexpand(true);
+            method_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+            method_lbl.set_max_width_chars(1);
+            if !idx.method.is_empty() {
+                method_lbl.set_tooltip_text(Some(&idx.method));
+            }
+
+            let actions = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+
+            let edit_btn = gtk::Button::from_icon_name("document-edit-symbolic");
+            edit_btn.add_css_class("flat");
+            edit_btn.set_tooltip_text(Some("Edit Index"));
+
+            let del_btn = gtk::Button::from_icon_name("user-trash-symbolic");
+            del_btn.add_css_class("flat");
+            del_btn.add_css_class("error");
+            del_btn.set_tooltip_text(Some("Drop Index"));
+
+            actions.append(&edit_btn);
+            actions.append(&del_btn);
+
+            let cells = vec![
+                wrap_resizable_row_cell(&name_lbl, widths[0]),
+                wrap_resizable_row_cell(&type_lbl, widths[1]),
+                wrap_resizable_row_cell(&cols_lbl, widths[2]),
+                wrap_resizable_row_cell(&uniq_lbl, widths[3]),
+                wrap_resizable_row_cell(&method_lbl, widths[4]),
+                wrap_resizable_row_cell(&actions, widths[5]),
+            ];
+
+            for cell in &cells {
+                row_box.append(cell);
+            }
+            self.idx_row_cells.borrow_mut().push(cells);
+
+            let row = gtk::ListBoxRow::new();
+            row.set_child(Some(&row_box));
+            self.idx_list_box.append(&row);
+
+            // Edit index handler
+            {
+                let tab_clone = self.clone();
+                let idx_clone = idx.clone();
+                edit_btn.connect_clicked(move |btn| {
+                    tab_clone.open_index_dialog(
+                        btn.upcast_ref::<gtk::Widget>(),
+                        Some(idx_clone.clone()),
+                    );
+                });
+            }
+
+            // Drop index handler
+            {
+                let tab_clone = self.clone();
+                let idx_clone = idx.clone();
+                del_btn.connect_clicked(move |btn| {
+                    tab_clone.confirm_drop_index(btn.upcast_ref::<gtk::Widget>(), &idx_clone);
+                });
+            }
+        }
+    }
+
+    fn suggest_index_name(table: &str, index_type: &str, columns: &[String]) -> String {
+        if index_type.eq_ignore_ascii_case("PRIMARY") {
+            return "PRIMARY".to_string();
+        }
+        let prefix = match index_type.to_ascii_uppercase().as_str() {
+            "UNIQUE" => "uniq",
+            "FULLTEXT" => "ft",
+            "SPATIAL" => "sp",
+            _ => "idx",
+        };
+        if columns.is_empty() {
+            format!("{}_{}", prefix, table)
+        } else {
+            format!("{}_{}_{}", prefix, table, columns.join("_"))
+        }
+    }
+
+    fn open_index_dialog(&self, parent: &gtk::Widget, existing: Option<IndexInfo>) {
+        let is_edit = existing.is_some();
+        let table = self.current_table.borrow().clone();
+        let all_cols = self.columns.borrow().clone();
+
+        let dialog = adw::Dialog::builder()
+            .title(if is_edit { "Edit Index" } else { "Add Index" })
+            .content_width(460)
+            .build();
+
+        let toolbar_view = adw::ToolbarView::new();
+        let header = adw::HeaderBar::new();
+        toolbar_view.add_top_bar(&header);
+
+        let content_box = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        content_box.set_margin_top(12);
+        content_box.set_margin_bottom(12);
+        content_box.set_margin_start(12);
+        content_box.set_margin_end(12);
+
+        let settings_group = adw::PreferencesGroup::new();
+
+        let init_type_idx = existing
+            .as_ref()
+            .and_then(|idx| {
+                INDEX_TYPES
+                    .iter()
+                    .position(|t| t.eq_ignore_ascii_case(&idx.index_type))
+            })
+            .unwrap_or(0);
+
+        let type_model = gtk::StringList::new(INDEX_TYPES);
+        let type_row = adw::ComboRow::builder()
+            .title("Index Type")
+            .model(&type_model)
+            .selected(init_type_idx as u32)
+            .build();
+
+        let init_method_idx = existing
+            .as_ref()
+            .and_then(|idx| {
+                INDEX_METHODS
+                    .iter()
+                    .position(|m| m.eq_ignore_ascii_case(&idx.method))
+            })
+            .unwrap_or(0);
+
+        let method_model = gtk::StringList::new(INDEX_METHODS);
+        let method_row = adw::ComboRow::builder()
+            .title("Storage Method")
+            .model(&method_model)
+            .selected(init_method_idx as u32)
+            .build();
+
+        let init_selected_cols: Vec<String> = match &existing {
+            Some(idx) => idx.columns.clone(),
+            None => all_cols
+                .iter()
+                .find(|c| !c.is_primary_key)
+                .or_else(|| all_cols.first())
+                .map(|c| vec![c.name.clone()])
+                .unwrap_or_default(),
+        };
+
+        let init_type_str = INDEX_TYPES[init_type_idx];
+        let init_suggested_name =
+            Self::suggest_index_name(&table, init_type_str, &init_selected_cols);
+        let init_name = existing
+            .as_ref()
+            .map(|idx| idx.name.clone())
+            .unwrap_or_else(|| init_suggested_name.clone());
+
+        let name_row = adw::EntryRow::builder()
+            .title("Key Name")
+            .text(&init_name)
+            .sensitive(!init_type_str.eq_ignore_ascii_case("PRIMARY"))
+            .build();
+
+        settings_group.add(&type_row);
+        settings_group.add(&name_row);
+        settings_group.add(&method_row);
+        content_box.append(&settings_group);
+
+        let cols_group = adw::PreferencesGroup::builder()
+            .title("Indexed Columns")
+            .description("Select one or more columns; use arrows to reorder composite keys")
+            .build();
+
+        let selected_cols = Rc::new(RefCell::new(init_selected_cols));
+        let last_auto_name = Rc::new(RefCell::new(if is_edit {
+            String::new()
+        } else {
+            init_suggested_name
+        }));
+        let updating_ui = Rc::new(RefCell::new(false));
+
+        // Store per-column widgets so we can refresh order badges & arrow buttons
+        struct ColRowWidgets {
+            col_name: String,
+            check: gtk::CheckButton,
+            order_lbl: gtk::Label,
+            up_btn: gtk::Button,
+            down_btn: gtk::Button,
+        }
+        let col_widgets: Rc<RefCell<Vec<ColRowWidgets>>> = Rc::new(RefCell::new(Vec::new()));
+
+        let save_btn = gtk::Button::with_label(if is_edit { "Apply Changes" } else { "Add Index" });
+        save_btn.add_css_class("suggested-action");
+        save_btn.set_sensitive(!selected_cols.borrow().is_empty());
+
+        let refresh_col_ui: Rc<dyn Fn()> = {
+            let col_widgets = col_widgets.clone();
+            let selected_cols = selected_cols.clone();
+            let type_row = type_row.clone();
+            let name_row = name_row.clone();
+            let last_auto_name = last_auto_name.clone();
+            let updating_ui = updating_ui.clone();
+            let save_btn = save_btn.clone();
+            let table = table.clone();
+
+            Rc::new(move || {
+                *updating_ui.borrow_mut() = true;
+                let sel = selected_cols.borrow();
+                let total_sel = sel.len();
+                for w in col_widgets.borrow().iter() {
+                    if let Some(pos) = sel.iter().position(|c| c == &w.col_name) {
+                        w.check.set_active(true);
+                        w.order_lbl.set_text(&format!("#{}", pos + 1));
+                        w.order_lbl.set_visible(true);
+                        w.up_btn.set_visible(total_sel > 1);
+                        w.down_btn.set_visible(total_sel > 1);
+                        w.up_btn.set_sensitive(pos > 0);
+                        w.down_btn.set_sensitive(pos + 1 < total_sel);
+                    } else {
+                        w.check.set_active(false);
+                        w.order_lbl.set_visible(false);
+                        w.up_btn.set_visible(false);
+                        w.down_btn.set_visible(false);
+                    }
+                }
+                save_btn.set_sensitive(total_sel > 0);
+
+                let cur_type = INDEX_TYPES
+                    .get(type_row.selected() as usize)
+                    .copied()
+                    .unwrap_or("INDEX");
+                let suggested = Self::suggest_index_name(&table, cur_type, &sel);
+                if cur_type.eq_ignore_ascii_case("PRIMARY") {
+                    name_row.set_text("PRIMARY");
+                    name_row.set_sensitive(false);
+                } else {
+                    name_row.set_sensitive(true);
+                    let current_text = name_row.text().trim().to_string();
+                    let prev_auto = last_auto_name.borrow().clone();
+                    if current_text.is_empty()
+                        || current_text.eq_ignore_ascii_case("PRIMARY")
+                        || (!prev_auto.is_empty() && current_text == prev_auto)
+                    {
+                        name_row.set_text(&suggested);
+                        *last_auto_name.borrow_mut() = suggested;
+                    }
+                }
+                *updating_ui.borrow_mut() = false;
+            })
+        };
+
+        for col in &all_cols {
+            let row = adw::ActionRow::builder()
+                .title(&col.name)
+                .subtitle(&col.data_type)
+                .build();
+
+            let check = gtk::CheckButton::new();
+            check.set_valign(gtk::Align::Center);
+            row.add_prefix(&check);
+            row.set_activatable_widget(Some(&check));
+
+            let order_lbl = gtk::Label::new(None);
+            order_lbl.add_css_class("monospace");
+            order_lbl.add_css_class("accent");
+            order_lbl.add_css_class("caption-heading");
+            order_lbl.set_valign(gtk::Align::Center);
+            order_lbl.set_margin_end(4);
+
+            let up_btn = gtk::Button::from_icon_name("go-up-symbolic");
+            up_btn.add_css_class("flat");
+            up_btn.set_valign(gtk::Align::Center);
+            up_btn.set_tooltip_text(Some("Move column earlier in composite index"));
+
+            let down_btn = gtk::Button::from_icon_name("go-down-symbolic");
+            down_btn.add_css_class("flat");
+            down_btn.set_valign(gtk::Align::Center);
+            down_btn.set_tooltip_text(Some("Move column later in composite index"));
+
+            row.add_suffix(&order_lbl);
+            row.add_suffix(&up_btn);
+            row.add_suffix(&down_btn);
+            cols_group.add(&row);
+
+            let col_name = col.name.clone();
+            {
+                let selected_cols = selected_cols.clone();
+                let updating_ui = updating_ui.clone();
+                let refresh_col_ui = refresh_col_ui.clone();
+                let col_name = col_name.clone();
+                check.connect_toggled(move |chk| {
+                    if *updating_ui.borrow() {
+                        return;
+                    }
+                    {
+                        let mut sel = selected_cols.borrow_mut();
+                        if chk.is_active() {
+                            if !sel.contains(&col_name) {
+                                sel.push(col_name.clone());
+                            }
+                        } else {
+                            sel.retain(|c| c != &col_name);
+                        }
+                    }
+                    refresh_col_ui();
+                });
+            }
+
+            {
+                let selected_cols = selected_cols.clone();
+                let refresh_col_ui = refresh_col_ui.clone();
+                let col_name = col_name.clone();
+                up_btn.connect_clicked(move |_| {
+                    {
+                        let mut sel = selected_cols.borrow_mut();
+                        if let Some(pos) = sel.iter().position(|c| c == &col_name) {
+                            if pos > 0 {
+                                sel.swap(pos, pos - 1);
+                            }
+                        }
+                    }
+                    refresh_col_ui();
+                });
+            }
+
+            {
+                let selected_cols = selected_cols.clone();
+                let refresh_col_ui = refresh_col_ui.clone();
+                let col_name = col_name.clone();
+                down_btn.connect_clicked(move |_| {
+                    {
+                        let mut sel = selected_cols.borrow_mut();
+                        if let Some(pos) = sel.iter().position(|c| c == &col_name) {
+                            if pos + 1 < sel.len() {
+                                sel.swap(pos, pos + 1);
+                            }
+                        }
+                    }
+                    refresh_col_ui();
+                });
+            }
+
+            col_widgets.borrow_mut().push(ColRowWidgets {
+                col_name,
+                check,
+                order_lbl,
+                up_btn,
+                down_btn,
+            });
+        }
+
+        // Update suggested name and sensitivity when Index Type changes
+        {
+            let refresh_col_ui = refresh_col_ui.clone();
+            type_row.connect_selected_notify(move |_| {
+                refresh_col_ui();
+            });
+        }
+
+        refresh_col_ui();
+
+        content_box.append(&cols_group);
+
+        let btn_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        btn_box.set_halign(gtk::Align::End);
+        btn_box.set_margin_top(4);
+
+        let cancel_btn = gtk::Button::with_label("Cancel");
+        btn_box.append(&cancel_btn);
+        btn_box.append(&save_btn);
+        content_box.append(&btn_box);
+
+        let dialog_scroll = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::Automatic)
+            .propagate_natural_height(true)
+            .max_content_height(520)
+            .child(&content_box)
+            .build();
+
+        toolbar_view.set_content(Some(&dialog_scroll));
+        dialog.set_child(Some(&toolbar_view));
+
+        {
+            let dialog = dialog.clone();
+            cancel_btn.connect_clicked(move |_| {
+                dialog.close();
+            });
+        }
+
+        {
+            let dialog = dialog.clone();
+            let cmd_tx = self.cmd_tx.clone();
+            let db = self.current_db.borrow().clone();
+            let table = self.current_table.borrow().clone();
+            let selected_cols = selected_cols.clone();
+            let old_idx = existing;
+            save_btn.connect_clicked(move |_| {
+                let cols = selected_cols.borrow().clone();
+                if cols.is_empty() {
+                    return;
+                }
+                let index_type = INDEX_TYPES
+                    .get(type_row.selected() as usize)
+                    .copied()
+                    .unwrap_or("INDEX")
+                    .to_string();
+                let method_sel = INDEX_METHODS
+                    .get(method_row.selected() as usize)
+                    .copied()
+                    .unwrap_or("Default");
+                let method = if method_sel.eq_ignore_ascii_case("Default") {
+                    None
+                } else {
+                    Some(method_sel.to_string())
+                };
+                let mut name = name_row.text().trim().to_string();
+                if name.is_empty() {
+                    name = Self::suggest_index_name(&table, &index_type, &cols);
+                }
+
+                let spec = IndexSpec {
+                    name,
+                    columns: cols,
+                    index_type,
+                    method,
+                };
+                let op = match &old_idx {
+                    Some(prev) => IndexAlterOp::Modify {
+                        old_name: prev.name.clone(),
+                        old_is_primary: prev.is_primary,
+                        spec,
+                    },
+                    None => IndexAlterOp::Add(spec),
+                };
+                let _ = cmd_tx.send_blocking(BackendCommand::AlterIndex {
+                    database: db.clone(),
+                    table: table.clone(),
+                    op,
+                });
+                dialog.close();
+            });
+        }
+
+        dialog.present(Some(parent));
+    }
+
+    fn confirm_drop_index(&self, parent: &gtk::Widget, idx: &IndexInfo) {
+        let table = self.current_table.borrow().clone();
+        let db = self.current_db.borrow().clone();
+        let alert = adw::AlertDialog::builder()
+            .heading(format!("Drop Index '{}'?", idx.name))
+            .body(format!(
+                "Are you sure you want to drop the {} index '{}' ({}) from table '{}'?",
+                idx.index_type,
+                idx.name,
+                idx.columns.join(", "),
+                table
+            ))
+            .build();
+        alert.add_response("cancel", "Cancel");
+        alert.add_response("drop", "Drop Index");
+        alert.set_response_appearance("drop", adw::ResponseAppearance::Destructive);
+        alert.set_default_response(Some("cancel"));
+        alert.set_close_response("cancel");
+
+        let cmd_tx = self.cmd_tx.clone();
+        let idx_name = idx.name.clone();
+        let is_primary = idx.is_primary;
+        alert.connect_response(None, move |_, resp| {
+            if resp == "drop" {
+                let _ = cmd_tx.send_blocking(BackendCommand::AlterIndex {
+                    database: db.clone(),
+                    table: table.clone(),
+                    op: IndexAlterOp::Drop {
+                        name: idx_name.clone(),
+                        is_primary,
                     },
                 });
             }

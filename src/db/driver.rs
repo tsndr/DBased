@@ -9,6 +9,8 @@ pub trait DatabaseDriver: Send + Sync {
     async fn list_tables(&self, db_name: &str) -> Result<Vec<TableInfo>>;
     async fn get_table_structure(&self, db_name: &str, table: &str) -> Result<Vec<ColumnInfo>>;
     async fn alter_column(&self, db_name: &str, table: &str, op: ColumnAlterOp) -> Result<()>;
+    async fn get_table_indexes(&self, db_name: &str, table: &str) -> Result<Vec<IndexInfo>>;
+    async fn alter_index(&self, db_name: &str, table: &str, op: IndexAlterOp) -> Result<()>;
     async fn get_table_content(
         &self,
         db_name: &str,

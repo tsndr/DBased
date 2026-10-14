@@ -192,6 +192,8 @@ pub fn spawn_db_worker() -> (Sender<BackendCommand>, Receiver<BackendEvent>) {
                         if let Some(ref sess) = session {
                             let structure_res =
                                 sess.driver.get_table_structure(&database, &table).await;
+                            let indexes_res =
+                                sess.driver.get_table_indexes(&database, &table).await;
                             let content_res = sess
                                 .driver
                                 .get_table_content(&database, &table, &content_query)
@@ -199,21 +201,25 @@ pub fn spawn_db_worker() -> (Sender<BackendCommand>, Receiver<BackendEvent>) {
                             let relations_res =
                                 sess.driver.get_relations(&database, &table).await;
 
-                            match (structure_res, content_res, relations_res) {
-                                (Ok(structure), Ok(content), Ok(relations)) => {
+                            match (structure_res, indexes_res, content_res, relations_res) {
+                                (Ok(structure), Ok(indexes), Ok(content), Ok(relations)) => {
                                     let _ = evt_tx
                                         .send(BackendEvent::TableLoaded {
                                             database,
                                             table,
                                             all_tables: sess.cached_tables.clone(),
                                             structure,
+                                            indexes,
                                             content,
                                             relations,
                                             content_query,
                                         })
                                         .await;
                                 }
-                                (Err(e), _, _) | (_, Err(e), _) | (_, _, Err(e)) => {
+                                (Err(e), _, _, _)
+                                | (_, Err(e), _, _)
+                                | (_, _, Err(e), _)
+                                | (_, _, _, Err(e)) => {
                                     let _ = evt_tx
                                         .send(BackendEvent::Error(format!("{:#}", e)))
                                         .await;
@@ -223,18 +229,23 @@ pub fn spawn_db_worker() -> (Sender<BackendCommand>, Receiver<BackendEvent>) {
                     }
                     BackendCommand::RefreshStructure { database, table } => {
                         if let Some(ref sess) = session {
-                            match sess.driver.get_table_structure(&database, &table).await {
-                                Ok(structure) => {
+                            let structure_res =
+                                sess.driver.get_table_structure(&database, &table).await;
+                            let indexes_res =
+                                sess.driver.get_table_indexes(&database, &table).await;
+                            match (structure_res, indexes_res) {
+                                (Ok(structure), Ok(indexes)) => {
                                     let _ = evt_tx
                                         .send(BackendEvent::StructureUpdated {
                                             database,
                                             table,
                                             structure,
+                                            indexes,
                                             toast: None,
                                         })
                                         .await;
                                 }
-                                Err(e) => {
+                                (Err(e), _) | (_, Err(e)) => {
                                     let _ = evt_tx
                                         .send(BackendEvent::Error(format!("{:#}", e)))
                                         .await;
@@ -260,32 +271,88 @@ pub fn spawn_db_worker() -> (Sender<BackendCommand>, Receiver<BackendEvent>) {
                             };
                             match sess.driver.alter_column(&database, &table, op).await {
                                 Ok(()) => {
-                                    if let Ok(structure) =
-                                        sess.driver.get_table_structure(&database, &table).await
-                                    {
+                                    if let (Ok(structure), Ok(indexes)) = (
+                                        sess.driver.get_table_structure(&database, &table).await,
+                                        sess.driver.get_table_indexes(&database, &table).await,
+                                    ) {
                                         let _ = evt_tx
                                             .send(BackendEvent::StructureUpdated {
                                                 database,
                                                 table,
                                                 structure,
+                                                indexes,
                                                 toast: Some(msg),
                                             })
                                             .await;
                                     }
                                 }
                                 Err(e) => {
-                                    if let Ok(structure) =
-                                        sess.driver.get_table_structure(&database, &table).await
-                                    {
+                                    if let (Ok(structure), Ok(indexes)) = (
+                                        sess.driver.get_table_structure(&database, &table).await,
+                                        sess.driver.get_table_indexes(&database, &table).await,
+                                    ) {
                                         let _ = evt_tx
                                             .send(BackendEvent::StructureUpdated {
                                                 database,
                                                 table,
                                                 structure,
+                                                indexes,
                                                 toast: None,
                                             })
                                             .await;
                                     }
+                                    let _ = evt_tx
+                                        .send(BackendEvent::Error(format!("{:#}", e)))
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+                    BackendCommand::AlterIndex {
+                        database,
+                        table,
+                        op,
+                    } => {
+                        if let Some(ref sess) = session {
+                            let msg = match &op {
+                                IndexAlterOp::Add(s) => {
+                                    let label = if s.name.trim().is_empty() {
+                                        s.index_type.as_str()
+                                    } else {
+                                        s.name.as_str()
+                                    };
+                                    format!("Added index '{}'", label)
+                                }
+                                IndexAlterOp::Modify { spec, old_name, .. } => {
+                                    let label = if spec.name.trim().is_empty() {
+                                        old_name.as_str()
+                                    } else {
+                                        spec.name.as_str()
+                                    };
+                                    format!("Updated index '{}'", label)
+                                }
+                                IndexAlterOp::Drop { name, .. } => {
+                                    format!("Dropped index '{}'", name)
+                                }
+                            };
+                            match sess.driver.alter_index(&database, &table, op).await {
+                                Ok(()) => {
+                                    if let (Ok(structure), Ok(indexes)) = (
+                                        sess.driver.get_table_structure(&database, &table).await,
+                                        sess.driver.get_table_indexes(&database, &table).await,
+                                    ) {
+                                        let _ = evt_tx
+                                            .send(BackendEvent::StructureUpdated {
+                                                database,
+                                                table,
+                                                structure,
+                                                indexes,
+                                                toast: Some(msg),
+                                            })
+                                            .await;
+                                    }
+                                }
+                                Err(e) => {
                                     let _ = evt_tx
                                         .send(BackendEvent::Error(format!("{:#}", e)))
                                         .await;

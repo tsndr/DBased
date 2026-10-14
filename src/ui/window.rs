@@ -100,6 +100,7 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                     table,
                     all_tables,
                     structure,
+                    indexes,
                     content,
                     relations,
                     content_query,
@@ -111,6 +112,7 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                         &database,
                         &table,
                         structure,
+                        indexes,
                     );
                     workspace_content
                         .content_tab
@@ -136,12 +138,14 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                     database,
                     table,
                     structure,
+                    indexes,
                     toast,
                 } => {
                     workspace_content.structure_tab.set_structure(
                         &database,
                         &table,
                         structure,
+                        indexes,
                     );
                     workspace_content.content_tab.request_fetch();
                     if let Some(msg) = toast {

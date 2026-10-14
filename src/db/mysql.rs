@@ -178,6 +178,49 @@ impl MySqlDriver {
         }
         parts.join(" ")
     }
+
+    fn format_add_index_clause(spec: &IndexSpec) -> Result<String> {
+        if spec.columns.is_empty() {
+            return Err(anyhow!("At least one column must be selected for an index"));
+        }
+        let cols = spec
+            .columns
+            .iter()
+            .map(|c| quote_mysql_ident(c))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let using_clause = match spec
+            .method
+            .as_deref()
+            .map(|s| s.trim().to_ascii_uppercase())
+        {
+            Some(ref m) if m == "BTREE" || m == "HASH" => format!(" USING {}", m),
+            _ => String::new(),
+        };
+        let idx_name = spec.name.trim();
+        let name_part = if idx_name.is_empty() || idx_name.eq_ignore_ascii_case("PRIMARY") {
+            String::new()
+        } else {
+            format!(" {}", quote_mysql_ident(idx_name))
+        };
+
+        let clause = match spec.index_type.trim().to_ascii_uppercase().as_str() {
+            "PRIMARY" => format!("ADD PRIMARY KEY{} ({})", using_clause, cols),
+            "UNIQUE" => format!("ADD UNIQUE INDEX{}{} ({})", name_part, using_clause, cols),
+            "FULLTEXT" => format!("ADD FULLTEXT INDEX{} ({})", name_part, cols),
+            "SPATIAL" => format!("ADD SPATIAL INDEX{} ({})", name_part, cols),
+            _ => format!("ADD INDEX{}{} ({})", name_part, using_clause, cols),
+        };
+        Ok(clause)
+    }
+
+    fn format_drop_index_clause(name: &str, is_primary: bool) -> String {
+        if is_primary || name.trim().eq_ignore_ascii_case("PRIMARY") {
+            "DROP PRIMARY KEY".to_string()
+        } else {
+            format!("DROP INDEX {}", quote_mysql_ident(name.trim()))
+        }
+    }
 }
 
 fn decode_mysql_cell(row: &MySqlRow, idx: usize) -> DbValue {
@@ -365,6 +408,110 @@ impl DatabaseDriver for MySqlDriver {
                     "ALTER TABLE {} MODIFY COLUMN {}",
                     fq_table,
                     Self::format_column_info_for_reorder(&column, after_column.as_deref())
+                )
+            }
+        };
+
+        sqlx::raw_sql(&sql)
+            .execute(&pool)
+            .await
+            .with_context(|| format!("Failed to execute: {}", sql))?;
+        Ok(())
+    }
+
+    async fn get_table_indexes(&self, db_name: &str, table: &str) -> Result<Vec<IndexInfo>> {
+        let pool = self.pool_for_db(db_name).await?;
+        let sql = format!(
+            "SELECT INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, COLUMN_NAME, INDEX_TYPE \
+             FROM information_schema.STATISTICS \
+             WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} \
+             ORDER BY CASE WHEN INDEX_NAME = 'PRIMARY' THEN 0 ELSE 1 END, INDEX_NAME, SEQ_IN_INDEX",
+            escape_sql_literal(&DbValue::Text(db_name.to_string())),
+            escape_sql_literal(&DbValue::Text(table.to_string()))
+        );
+        let rows = sqlx::raw_sql(&sql)
+            .fetch_all(&pool)
+            .await
+            .with_context(|| format!("Failed to fetch indexes for '{}.{}'", db_name, table))?;
+
+        let mut indexes: Vec<IndexInfo> = Vec::new();
+        for row in rows {
+            let idx_name = decode_mysql_cell(&row, 0).display_text().to_string();
+            let non_unique = decode_mysql_cell(&row, 1)
+                .display_text()
+                .parse::<i32>()
+                .unwrap_or(1);
+            let col_name = match decode_mysql_cell(&row, 3) {
+                DbValue::Null => String::new(),
+                DbValue::Text(s) => s,
+            };
+            let raw_method = decode_mysql_cell(&row, 4)
+                .display_text()
+                .to_ascii_uppercase();
+
+            if let Some(existing) = indexes.last_mut().filter(|i| i.name == idx_name) {
+                if !col_name.is_empty() {
+                    existing.columns.push(col_name);
+                }
+            } else {
+                let is_primary = idx_name.eq_ignore_ascii_case("PRIMARY");
+                let is_unique = is_primary || non_unique == 0;
+                let index_type = if is_primary {
+                    "PRIMARY".to_string()
+                } else if raw_method == "FULLTEXT" {
+                    "FULLTEXT".to_string()
+                } else if raw_method == "SPATIAL" {
+                    "SPATIAL".to_string()
+                } else if is_unique {
+                    "UNIQUE".to_string()
+                } else {
+                    "INDEX".to_string()
+                };
+                let mut columns = Vec::new();
+                if !col_name.is_empty() {
+                    columns.push(col_name);
+                }
+                indexes.push(IndexInfo {
+                    name: idx_name,
+                    columns,
+                    is_unique,
+                    is_primary,
+                    index_type,
+                    method: raw_method,
+                });
+            }
+        }
+        Ok(indexes)
+    }
+
+    async fn alter_index(&self, db_name: &str, table: &str, op: IndexAlterOp) -> Result<()> {
+        let pool = self.pool_for_db(db_name).await?;
+        let fq_table = Self::qualified_table(db_name, table);
+        let sql = match op {
+            IndexAlterOp::Add(spec) => {
+                format!(
+                    "ALTER TABLE {} {}",
+                    fq_table,
+                    Self::format_add_index_clause(&spec)?
+                )
+            }
+            IndexAlterOp::Modify {
+                old_name,
+                old_is_primary,
+                spec,
+            } => {
+                format!(
+                    "ALTER TABLE {} {}, {}",
+                    fq_table,
+                    Self::format_drop_index_clause(&old_name, old_is_primary),
+                    Self::format_add_index_clause(&spec)?
+                )
+            }
+            IndexAlterOp::Drop { name, is_primary } => {
+                format!(
+                    "ALTER TABLE {} {}",
+                    fq_table,
+                    Self::format_drop_index_clause(&name, is_primary)
                 )
             }
         };
@@ -744,6 +891,40 @@ mod tests {
         assert_eq!(
             MySqlDriver::format_column_info_for_reorder(&col_after, Some("id")),
             "`updated_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP on update CURRENT_TIMESTAMP AFTER `id`"
+        );
+    }
+
+    #[test]
+    fn test_mysql_index_sql_formatting() {
+        let idx = IndexSpec {
+            name: "idx_users_email_status".to_string(),
+            columns: vec!["email".to_string(), "status".to_string()],
+            index_type: "UNIQUE".to_string(),
+            method: Some("BTREE".to_string()),
+        };
+        assert_eq!(
+            MySqlDriver::format_add_index_clause(&idx).unwrap(),
+            "ADD UNIQUE INDEX `idx_users_email_status` USING BTREE (`email`, `status`)"
+        );
+
+        let pk = IndexSpec {
+            name: "PRIMARY".to_string(),
+            columns: vec!["id".to_string()],
+            index_type: "PRIMARY".to_string(),
+            method: None,
+        };
+        assert_eq!(
+            MySqlDriver::format_add_index_clause(&pk).unwrap(),
+            "ADD PRIMARY KEY (`id`)"
+        );
+
+        assert_eq!(
+            MySqlDriver::format_drop_index_clause("PRIMARY", true),
+            "DROP PRIMARY KEY"
+        );
+        assert_eq!(
+            MySqlDriver::format_drop_index_clause("idx_users_email", false),
+            "DROP INDEX `idx_users_email`"
         );
     }
 }

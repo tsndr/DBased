@@ -171,6 +171,7 @@ impl PostgresDriver {
 
         let affected_cols = &new_cols[start_idx..];
         let relations = self.get_relations(db_name, table).await?;
+        let existing_indexes = self.get_table_indexes(db_name, table).await.unwrap_or_default();
         let fq_table = Self::qualified_table(table);
         let pool = self.pool_for_db(db_name).await?;
 
@@ -320,6 +321,26 @@ impl PostgresDriver {
             ));
         }
 
+        // 6. Recreate any secondary indexes that referenced affected columns
+        for idx in &existing_indexes {
+            if !idx.is_primary
+                && idx
+                    .columns
+                    .iter()
+                    .any(|ic| affected_cols.iter().any(|ac| &ac.name == ic))
+            {
+                let spec = IndexSpec {
+                    name: idx.name.clone(),
+                    columns: idx.columns.clone(),
+                    index_type: idx.index_type.clone(),
+                    method: Some(idx.method.clone()),
+                };
+                if let Ok(create_stmt) = Self::format_create_index_stmt(table, &spec) {
+                    stmts.push(create_stmt);
+                }
+            }
+        }
+
         stmts.push("COMMIT".to_string());
         let batch_sql = stmts.join(";\n");
 
@@ -329,6 +350,132 @@ impl PostgresDriver {
             .with_context(|| format!("Failed to reorder columns in '{}'", table))?;
 
         Ok(())
+    }
+
+    fn format_create_index_stmt(table: &str, spec: &IndexSpec) -> Result<String> {
+        if spec.columns.is_empty() {
+            return Err(anyhow!("At least one column must be selected for an index"));
+        }
+        let fq_table = Self::qualified_table(table);
+        let cols = spec
+            .columns
+            .iter()
+            .map(|c| quote_pg_ident(c))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let idx_type = spec.index_type.trim().to_ascii_uppercase();
+        if idx_type == "PRIMARY" {
+            let trimmed_name = spec.name.trim();
+            if trimmed_name.is_empty() || trimmed_name.eq_ignore_ascii_case("PRIMARY") {
+                return Ok(format!("ALTER TABLE {} ADD PRIMARY KEY ({})", fq_table, cols));
+            } else {
+                return Ok(format!(
+                    "ALTER TABLE {} ADD CONSTRAINT {} PRIMARY KEY ({})",
+                    fq_table,
+                    quote_pg_ident(trimmed_name),
+                    cols
+                ));
+            }
+        }
+
+        let unique_kw = if idx_type == "UNIQUE" { "UNIQUE " } else { "" };
+        let default_name = format!(
+            "{}_{}_{}",
+            if idx_type == "UNIQUE" { "uniq" } else { "idx" },
+            table,
+            spec.columns.join("_")
+        );
+        let idx_name = if spec.name.trim().is_empty()
+            || spec.name.trim().eq_ignore_ascii_case("PRIMARY")
+        {
+            default_name.as_str()
+        } else {
+            spec.name.trim()
+        };
+
+        let using_clause = match spec
+            .method
+            .as_deref()
+            .map(|s| s.trim().to_ascii_lowercase())
+        {
+            Some(ref m) if matches!(m.as_str(), "btree" | "hash" | "gin" | "gist" | "brin") => {
+                format!(" USING {}", m)
+            }
+            _ if idx_type == "SPATIAL" => " USING gist".to_string(),
+            _ => String::new(),
+        };
+
+        Ok(format!(
+            "CREATE {}INDEX {} ON {}{} ({})",
+            unique_kw,
+            quote_pg_ident(idx_name),
+            fq_table,
+            using_clause,
+            cols
+        ))
+    }
+
+    async fn resolve_drop_index_stmt(
+        &self,
+        pool: &PgPool,
+        table: &str,
+        index_name: &str,
+        is_primary: bool,
+    ) -> Result<String> {
+        let fq_table = Self::qualified_table(table);
+        let escaped_table = escape_sql_literal(&DbValue::Text(table.to_string()));
+        let escaped_idx = escape_sql_literal(&DbValue::Text(index_name.trim().to_string()));
+
+        // Check if this index backs a constraint in pg_constraint (e.g. PRIMARY KEY or UNIQUE constraint)
+        let con_sql = format!(
+            "SELECT con.conname \
+             FROM pg_constraint con \
+             JOIN pg_class idx ON idx.oid = con.conindid \
+             JOIN pg_class tbl ON tbl.oid = con.conrelid \
+             JOIN pg_namespace n ON n.oid = tbl.relnamespace \
+             WHERE n.nspname = 'public' \
+               AND tbl.relname = {} \
+               AND idx.relname = {}",
+            escaped_table, escaped_idx
+        );
+        let rows = sqlx::raw_sql(&con_sql).fetch_all(pool).await?;
+        if let Some(first) = rows.first() {
+            let con_name = decode_pg_cell(first, 0).display_text().to_string();
+            if !con_name.is_empty() {
+                return Ok(format!(
+                    "ALTER TABLE {} DROP CONSTRAINT {}",
+                    fq_table,
+                    quote_pg_ident(&con_name)
+                ));
+            }
+        }
+
+        if is_primary {
+            let pk_sql = format!(
+                "SELECT tc.constraint_name \
+                 FROM information_schema.table_constraints tc \
+                 WHERE tc.constraint_type = 'PRIMARY KEY' \
+                   AND tc.table_schema = 'public' \
+                   AND tc.table_name = {}",
+                escaped_table
+            );
+            let pk_rows = sqlx::raw_sql(&pk_sql).fetch_all(pool).await?;
+            if let Some(first) = pk_rows.first() {
+                let pk_name = decode_pg_cell(first, 0).display_text().to_string();
+                if !pk_name.is_empty() {
+                    return Ok(format!(
+                        "ALTER TABLE {} DROP CONSTRAINT {}",
+                        fq_table,
+                        quote_pg_ident(&pk_name)
+                    ));
+                }
+            }
+        }
+
+        Ok(format!(
+            "DROP INDEX \"public\".{}",
+            quote_pg_ident(index_name.trim())
+        ))
     }
 }
 
@@ -576,6 +723,106 @@ impl DatabaseDriver for PostgresDriver {
             }
             ColumnAlterOp::Reorder { new_order, .. } => {
                 return self.reorder_columns(db_name, table, &new_order).await;
+            }
+        };
+
+        sqlx::raw_sql(&sql)
+            .execute(&pool)
+            .await
+            .with_context(|| format!("Failed to execute: {}", sql))?;
+        Ok(())
+    }
+
+    async fn get_table_indexes(&self, db_name: &str, table: &str) -> Result<Vec<IndexInfo>> {
+        let pool = self.pool_for_db(db_name).await?;
+        let escaped_table = escape_sql_literal(&DbValue::Text(table.to_string()));
+        let sql = format!(
+            "SELECT \
+                i.relname AS index_name, \
+                ix.indisunique AS is_unique, \
+                ix.indisprimary AS is_primary, \
+                UPPER(am.amname) AS index_method, \
+                k.ord AS seq_in_index, \
+                COALESCE(a.attname, pg_get_indexdef(ix.indexrelid, k.ord::int, true)) AS column_name \
+             FROM pg_index ix \
+             JOIN pg_class t ON t.oid = ix.indrelid \
+             JOIN pg_class i ON i.oid = ix.indexrelid \
+             JOIN pg_namespace n ON n.oid = t.relnamespace \
+             JOIN pg_am am ON am.oid = i.relam \
+             CROSS JOIN LATERAL unnest(ix.indkey::int2[]) WITH ORDINALITY AS k(attnum, ord) \
+             LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum AND k.attnum > 0 \
+             WHERE n.nspname = 'public' \
+               AND t.relname = {tbl} \
+               AND k.ord <= ix.indnkeyatts \
+             ORDER BY ix.indisprimary DESC, i.relname ASC, k.ord ASC",
+            tbl = escaped_table
+        );
+
+        let rows = sqlx::raw_sql(&sql)
+            .fetch_all(&pool)
+            .await
+            .with_context(|| format!("Failed to fetch indexes for '{}'", table))?;
+
+        let mut indexes: Vec<IndexInfo> = Vec::new();
+        for row in rows {
+            let idx_name = decode_pg_cell(&row, 0).display_text().to_string();
+            let unique_str = decode_pg_cell(&row, 1).display_text().to_string();
+            let is_unique = unique_str.eq_ignore_ascii_case("true") || unique_str == "t";
+            let primary_str = decode_pg_cell(&row, 2).display_text().to_string();
+            let is_primary = primary_str.eq_ignore_ascii_case("true") || primary_str == "t";
+            let method = decode_pg_cell(&row, 3).display_text().to_ascii_uppercase();
+            let col_name = match decode_pg_cell(&row, 5) {
+                DbValue::Null => String::new(),
+                DbValue::Text(s) => s,
+            };
+
+            if let Some(existing) = indexes.last_mut().filter(|i| i.name == idx_name) {
+                if !col_name.is_empty() {
+                    existing.columns.push(col_name);
+                }
+            } else {
+                let index_type = if is_primary {
+                    "PRIMARY".to_string()
+                } else if is_unique {
+                    "UNIQUE".to_string()
+                } else {
+                    "INDEX".to_string()
+                };
+                let mut columns = Vec::new();
+                if !col_name.is_empty() {
+                    columns.push(col_name);
+                }
+                indexes.push(IndexInfo {
+                    name: idx_name,
+                    columns,
+                    is_unique,
+                    is_primary,
+                    index_type,
+                    method,
+                });
+            }
+        }
+        Ok(indexes)
+    }
+
+    async fn alter_index(&self, db_name: &str, table: &str, op: IndexAlterOp) -> Result<()> {
+        let pool = self.pool_for_db(db_name).await?;
+        let sql = match op {
+            IndexAlterOp::Add(spec) => Self::format_create_index_stmt(table, &spec)?,
+            IndexAlterOp::Modify {
+                old_name,
+                old_is_primary,
+                spec,
+            } => {
+                let drop_stmt = self
+                    .resolve_drop_index_stmt(&pool, table, &old_name, old_is_primary)
+                    .await?;
+                let create_stmt = Self::format_create_index_stmt(table, &spec)?;
+                format!("BEGIN;\n{};\n{};\nCOMMIT", drop_stmt, create_stmt)
+            }
+            IndexAlterOp::Drop { name, is_primary } => {
+                self.resolve_drop_index_stmt(&pool, table, &name, is_primary)
+                    .await?
             }
         };
 
@@ -919,5 +1166,46 @@ impl DatabaseDriver for PostgresDriver {
                 ),
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pg_index_sql_formatting() {
+        let idx = IndexSpec {
+            name: "idx_orders_user_created".to_string(),
+            columns: vec!["user_id".to_string(), "created_at".to_string()],
+            index_type: "INDEX".to_string(),
+            method: Some("BTREE".to_string()),
+        };
+        assert_eq!(
+            PostgresDriver::format_create_index_stmt("orders", &idx).unwrap(),
+            "CREATE INDEX \"idx_orders_user_created\" ON \"public\".\"orders\" USING btree (\"user_id\", \"created_at\")"
+        );
+
+        let uniq = IndexSpec {
+            name: String::new(),
+            columns: vec!["email".to_string()],
+            index_type: "UNIQUE".to_string(),
+            method: None,
+        };
+        assert_eq!(
+            PostgresDriver::format_create_index_stmt("users", &uniq).unwrap(),
+            "CREATE UNIQUE INDEX \"uniq_users_email\" ON \"public\".\"users\" (\"email\")"
+        );
+
+        let pk = IndexSpec {
+            name: "PRIMARY".to_string(),
+            columns: vec!["id".to_string()],
+            index_type: "PRIMARY".to_string(),
+            method: None,
+        };
+        assert_eq!(
+            PostgresDriver::format_create_index_stmt("users", &pk).unwrap(),
+            "ALTER TABLE \"public\".\"users\" ADD PRIMARY KEY (\"id\")"
+        );
     }
 }
