@@ -3,7 +3,12 @@ use crate::db::models::{
     BackendCommand, ColumnInfo, ContentQuery, DbValue, ForeignKeyInfo, PrimaryKeyValue, RowUpdate,
     SortDirection, TablePage,
 };
-use crate::ui::workspace::{MIN_COLUMN_WIDTH, build_resizable_header_cell};
+use crate::ui::workspace::{
+    CELL_EXTRA_PADDING, DEFAULT_DATA_COL_WIDTH, HEADER_EXTRA_PADDING,
+    MAX_LONG_TEXT_AUTO_COL_WIDTH, MAX_MEASURE_CHARS, MIN_COLUMN_WIDTH,
+    build_resizable_header_cell, compute_auto_column_widths, format_long_text_preview,
+    measure_single_line_text,
+};
 use adw::prelude::*;
 use async_channel::Sender;
 use gtk4 as gtk;
@@ -16,13 +21,8 @@ use std::io::Write;
 use std::rc::Rc;
 
 const DEFAULT_INDEX_COL_WIDTH: i32 = 64;
-const DEFAULT_DATA_COL_WIDTH: i32 = 160;
-const MAX_LONG_TEXT_AUTO_COL_WIDTH: i32 = 320;
 const DEFAULT_LONG_TEXT_PANEL_WIDTH: i32 = 380;
-const HEADER_EXTRA_PADDING: i32 = 34;
-const CELL_EXTRA_PADDING: i32 = 28;
 const FK_BTN_EXTRA_WIDTH: i32 = 30;
-const MAX_MEASURE_CHARS: usize = 1000;
 const MOUSE_BUTTON_BACK: u32 = 8;
 const MOUSE_BUTTON_FORWARD: u32 = 9;
 
@@ -1342,7 +1342,7 @@ impl ContentTab {
             .collect();
 
         let idx_w = *self.index_col_width.borrow();
-        let total_avail = (viewport_w - idx_w).max(0);
+        let total_avail = (viewport_w - idx_w - 2).max(0);
         let widths = compute_auto_column_widths(&natural_widths, &manual_overrides, total_avail);
 
         for ((_, hdr_cell), target_w) in header_cells.iter().zip(widths.into_iter()) {
@@ -1350,22 +1350,6 @@ impl ContentTab {
                 hdr_cell.set_width_request(target_w);
             }
         }
-    }
-
-    fn measure_single_line_text<W: IsA<gtk::Widget>>(widget: &W, text: &str) -> i32 {
-        if text.is_empty() {
-            return 0;
-        }
-        let truncated: String;
-        let sample = if text.chars().count() > MAX_MEASURE_CHARS {
-            truncated = text.chars().take(MAX_MEASURE_CHARS).collect();
-            truncated.as_str()
-        } else {
-            text
-        };
-        let layout = widget.create_pango_layout(Some(sample));
-        layout.set_single_paragraph_mode(true);
-        layout.pixel_size().0
     }
 
     fn render_grid(&self) {
@@ -1623,7 +1607,7 @@ impl ContentTab {
 
         for (col_idx, col_info) in page.columns.iter().enumerate() {
             let (hdr_lbl, btn_label) = &header_labels[col_idx];
-            let hdr_w = Self::measure_single_line_text(hdr_lbl, btn_label) + HEADER_EXTRA_PADDING;
+            let hdr_w = measure_single_line_text(hdr_lbl, btn_label) + HEADER_EXTRA_PADDING;
 
             let has_fk = relations.iter().any(|fk| fk.column_name == col_info.name);
             let is_long_text = col_info.is_long_text();
@@ -1682,9 +1666,9 @@ impl ContentTab {
                     val.display_text()
                 };
                 let text_px = if let Some(ref entry_widget) = sample_entry {
-                    Self::measure_single_line_text(entry_widget, txt)
+                    measure_single_line_text(entry_widget, txt)
                 } else {
-                    Self::measure_single_line_text(hdr_lbl, txt)
+                    measure_single_line_text(hdr_lbl, txt)
                 };
                 let fk_extra = if has_fk && !val.is_null() && !txt.is_empty() {
                     FK_BTN_EXTRA_WIDTH
@@ -1943,7 +1927,7 @@ impl ContentTab {
             };
             let long_text_extra = if is_long_text { FK_BTN_EXTRA_WIDTH } else { 0 };
             let raw_cell_w =
-                Self::measure_single_line_text(&entry, txt) + CELL_EXTRA_PADDING + fk_extra + long_text_extra;
+                measure_single_line_text(&entry, txt) + CELL_EXTRA_PADDING + fk_extra + long_text_extra;
             let cell_w = if is_long_text {
                 raw_cell_w.min(MAX_LONG_TEXT_AUTO_COL_WIDTH)
             } else {
@@ -2163,128 +2147,6 @@ fn export_page_to_json(page: &TablePage, path: &std::path::Path) -> anyhow::Resu
     let mut f = File::create(path)?;
     f.write_all(formatted.as_bytes())?;
     Ok(())
-}
-
-fn compute_auto_column_widths(
-    natural_widths: &[i32],
-    manual_overrides: &[Option<i32>],
-    total_avail: i32,
-) -> Vec<i32> {
-    let num_cols = natural_widths.len();
-    let mut widths = Vec::with_capacity(num_cols);
-    let mut is_manual = Vec::with_capacity(num_cols);
-
-    for i in 0..num_cols {
-        if let Some(Some(w)) = manual_overrides.get(i) {
-            widths.push((*w).max(MIN_COLUMN_WIDTH));
-            is_manual.push(true);
-        } else {
-            let nat_w = natural_widths[i].max(MIN_COLUMN_WIDTH);
-            widths.push(nat_w.min(DEFAULT_DATA_COL_WIDTH));
-            is_manual.push(false);
-        }
-    }
-
-    let current_sum: i32 = widths.iter().sum();
-    let mut remaining = (total_avail.max(0) - current_sum).max(0);
-
-    // Pass 1: Water-fill columns whose full content is wider than DEFAULT_DATA_COL_WIDTH
-    // up to their natural full-content width if available width allows for it.
-    while remaining > 0 {
-        let needy: Vec<usize> = (0..num_cols)
-            .filter(|&i| !is_manual[i] && widths[i] < natural_widths[i])
-            .collect();
-        if needy.is_empty() {
-            break;
-        }
-        let count = needy.len() as i32;
-        let min_deficit = needy
-            .iter()
-            .map(|&i| natural_widths[i] - widths[i])
-            .min()
-            .unwrap_or(0);
-        if min_deficit <= 0 {
-            break;
-        }
-        if min_deficit * count <= remaining {
-            for &i in &needy {
-                widths[i] += min_deficit;
-                remaining -= min_deficit;
-            }
-        } else {
-            let share = remaining / count;
-            let extra = remaining % count;
-            for (idx, &i) in needy.iter().enumerate() {
-                widths[i] += share + if (idx as i32) < extra { 1 } else { 0 };
-            }
-            remaining = 0;
-            break;
-        }
-    }
-
-    // Pass 2: If space still remains after all columns show their full content,
-    // expand narrow columns up to DEFAULT_DATA_COL_WIDTH so they don't look cramped.
-    while remaining > 0 {
-        let narrow: Vec<usize> = (0..num_cols)
-            .filter(|&i| !is_manual[i] && widths[i] < DEFAULT_DATA_COL_WIDTH)
-            .collect();
-        if narrow.is_empty() {
-            break;
-        }
-        let count = narrow.len() as i32;
-        let min_deficit = narrow
-            .iter()
-            .map(|&i| DEFAULT_DATA_COL_WIDTH - widths[i])
-            .min()
-            .unwrap_or(0);
-        if min_deficit <= 0 {
-            break;
-        }
-        if min_deficit * count <= remaining {
-            for &i in &narrow {
-                widths[i] += min_deficit;
-                remaining -= min_deficit;
-            }
-        } else {
-            let share = remaining / count;
-            let extra = remaining % count;
-            for (idx, &i) in narrow.iter().enumerate() {
-                widths[i] += share + if (idx as i32) < extra { 1 } else { 0 };
-            }
-            break;
-        }
-    }
-
-    widths
-}
-
-fn format_long_text_preview(val: &DbValue) -> String {
-    match val {
-        DbValue::Null => "NULL".to_string(),
-        DbValue::Text(s) => {
-            let mut out = String::with_capacity(s.len().min(MAX_MEASURE_CHARS));
-            let mut chars = s.chars().peekable();
-            let mut count = 0;
-            while let Some(c) = chars.next() {
-                if count >= MAX_MEASURE_CHARS {
-                    out.push('…');
-                    break;
-                }
-                if c == '\r' {
-                    if chars.peek() == Some(&'\n') {
-                        let _ = chars.next();
-                    }
-                    out.push_str(" ↵ ");
-                } else if c == '\n' {
-                    out.push_str(" ↵ ");
-                } else {
-                    out.push(c);
-                }
-                count += 1;
-            }
-            out
-        }
-    }
 }
 
 #[cfg(test)]

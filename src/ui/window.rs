@@ -83,7 +83,6 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                         tables,
                     );
                     root_stack.set_visible_child_name("workspace");
-                    show_toast(&format!("Connected to {}", connection_name));
                 }
                 BackendEvent::Disconnected => {
                     workspace_content.content_tab.clear_navigation_history();

@@ -90,7 +90,155 @@ impl WorkspaceContent {
 }
 
 pub const MIN_COLUMN_WIDTH: i32 = 48;
+pub const DEFAULT_DATA_COL_WIDTH: i32 = 160;
+pub const MAX_LONG_TEXT_AUTO_COL_WIDTH: i32 = 320;
+pub const HEADER_EXTRA_PADDING: i32 = 34;
+pub const CELL_EXTRA_PADDING: i32 = 28;
+pub const MAX_MEASURE_CHARS: usize = 1000;
 const RESIZE_HANDLE_HIT_WIDTH: i32 = 10;
+
+pub fn measure_single_line_text<W: gtk4::prelude::IsA<gtk4::Widget>>(
+    widget: &W,
+    text: &str,
+) -> i32 {
+    use gtk4::prelude::*;
+    if text.is_empty() {
+        return 0;
+    }
+    let truncated: String;
+    let sample = if text.chars().count() > MAX_MEASURE_CHARS {
+        truncated = text.chars().take(MAX_MEASURE_CHARS).collect();
+        truncated.as_str()
+    } else {
+        text
+    };
+    let layout = widget.create_pango_layout(Some(sample));
+    layout.set_single_paragraph_mode(true);
+    layout.pixel_size().0
+}
+
+pub fn compute_auto_column_widths(
+    natural_widths: &[i32],
+    manual_overrides: &[Option<i32>],
+    total_avail: i32,
+) -> Vec<i32> {
+    let num_cols = natural_widths.len();
+    let mut widths = Vec::with_capacity(num_cols);
+    let mut is_manual = Vec::with_capacity(num_cols);
+
+    for (i, &nat_width) in natural_widths.iter().enumerate() {
+        if let Some(Some(w)) = manual_overrides.get(i) {
+            widths.push((*w).max(MIN_COLUMN_WIDTH));
+            is_manual.push(true);
+        } else {
+            let nat_w = nat_width.max(MIN_COLUMN_WIDTH);
+            widths.push(nat_w.min(DEFAULT_DATA_COL_WIDTH));
+            is_manual.push(false);
+        }
+    }
+
+    let current_sum: i32 = widths.iter().sum();
+    let mut remaining = (total_avail.max(0) - current_sum).max(0);
+
+    // Pass 1: Water-fill columns whose full content is wider than DEFAULT_DATA_COL_WIDTH
+    // up to their natural full-content width if available width allows for it.
+    while remaining > 0 {
+        let needy: Vec<usize> = (0..num_cols)
+            .filter(|&i| !is_manual[i] && widths[i] < natural_widths[i])
+            .collect();
+        if needy.is_empty() {
+            break;
+        }
+        let count = needy.len() as i32;
+        let min_deficit = needy
+            .iter()
+            .map(|&i| natural_widths[i] - widths[i])
+            .min()
+            .unwrap_or(0);
+        if min_deficit <= 0 {
+            break;
+        }
+        if min_deficit * count <= remaining {
+            for &i in &needy {
+                widths[i] += min_deficit;
+                remaining -= min_deficit;
+            }
+        } else {
+            let share = remaining / count;
+            let extra = remaining % count;
+            for (idx, &i) in needy.iter().enumerate() {
+                widths[i] += share + if (idx as i32) < extra { 1 } else { 0 };
+            }
+            remaining = 0;
+            break;
+        }
+    }
+
+    // Pass 2: If space still remains after all columns show their full content,
+    // expand narrow columns up to DEFAULT_DATA_COL_WIDTH so they don't look cramped.
+    while remaining > 0 {
+        let narrow: Vec<usize> = (0..num_cols)
+            .filter(|&i| !is_manual[i] && widths[i] < DEFAULT_DATA_COL_WIDTH)
+            .collect();
+        if narrow.is_empty() {
+            break;
+        }
+        let count = narrow.len() as i32;
+        let min_deficit = narrow
+            .iter()
+            .map(|&i| DEFAULT_DATA_COL_WIDTH - widths[i])
+            .min()
+            .unwrap_or(0);
+        if min_deficit <= 0 {
+            break;
+        }
+        if min_deficit * count <= remaining {
+            for &i in &narrow {
+                widths[i] += min_deficit;
+                remaining -= min_deficit;
+            }
+        } else {
+            let share = remaining / count;
+            let extra = remaining % count;
+            for (idx, &i) in narrow.iter().enumerate() {
+                widths[i] += share + if (idx as i32) < extra { 1 } else { 0 };
+            }
+            break;
+        }
+    }
+
+    widths
+}
+
+pub fn format_long_text_preview(val: &crate::db::models::DbValue) -> String {
+    use crate::db::models::DbValue;
+    match val {
+        DbValue::Null => "NULL".to_string(),
+        DbValue::Text(s) => {
+            let mut out = String::with_capacity(s.len().min(MAX_MEASURE_CHARS));
+            let mut chars = s.chars().peekable();
+            let mut count = 0;
+            while let Some(c) = chars.next() {
+                if count >= MAX_MEASURE_CHARS {
+                    out.push('…');
+                    break;
+                }
+                if c == '\r' {
+                    if chars.peek() == Some(&'\n') {
+                        let _ = chars.next();
+                    }
+                    out.push_str(" ↵ ");
+                } else if c == '\n' {
+                    out.push_str(" ↵ ");
+                } else {
+                    out.push(c);
+                }
+                count += 1;
+            }
+            out
+        }
+    }
+}
 
 /// Wraps a header content widget inside a horizontally-resizable header cell box
 /// with a right-edge resize handle that supports smooth mouse dragging.

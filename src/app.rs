@@ -172,7 +172,7 @@ pub fn run_app() -> gtk::glib::ExitCode {
     app.run()
 }
 
-fn load_css() {
+pub(crate) fn load_css() {
     let provider = gtk::CssProvider::new();
     provider.load_from_string(CUSTOM_CSS);
 

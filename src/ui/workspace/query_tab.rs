@@ -1,23 +1,38 @@
 use crate::db::models::{BackendCommand, DbValue, RawQueryOutcome, RawQueryResultSet};
+use crate::ui::workspace::{
+    CELL_EXTRA_PADDING, DEFAULT_DATA_COL_WIDTH, HEADER_EXTRA_PADDING,
+    MAX_LONG_TEXT_AUTO_COL_WIDTH, MAX_MEASURE_CHARS, MIN_COLUMN_WIDTH,
+    build_resizable_header_cell, compute_auto_column_widths, format_long_text_preview,
+    measure_single_line_text,
+};
 use async_channel::Sender;
 use gtk4 as gtk;
 use libadwaita as adw;
 use sourceview5::prelude::*;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::Write;
 use std::rc::Rc;
+
+const DEFAULT_INDEX_COL_WIDTH: i32 = 48;
 
 #[derive(Clone)]
 pub struct QueryTab {
     pub root: gtk::Paned,
     buffer: sourceview5::Buffer,
     view: sourceview5::View,
+    results_scroll: gtk::ScrolledWindow,
     results_grid: gtk::Grid,
     results_status: gtk::Label,
     export_menu_btn: gtk::MenuButton,
     current_db: Rc<RefCell<String>>,
     last_result: Rc<RefCell<Option<RawQueryResultSet>>>,
+    col_widths: Rc<RefCell<HashMap<usize, i32>>>,
+    natural_col_widths: Rc<RefCell<Vec<i32>>>,
+    header_cells: Rc<RefCell<Vec<(usize, gtk::Box)>>>,
+    last_viewport_width: Rc<RefCell<i32>>,
+    index_col_width: Rc<RefCell<i32>>,
     cmd_tx: Sender<BackendCommand>,
 }
 
@@ -154,6 +169,10 @@ impl QueryTab {
         results_status.set_halign(gtk::Align::Start);
         results_status.set_hexpand(true);
 
+        let results_hint_lbl = gtk::Label::new(Some("Drag column borders to resize"));
+        results_hint_lbl.add_css_class("caption");
+        results_hint_lbl.add_css_class("dim-label");
+
         let export_popover = gtk::Popover::new();
         let exp_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
         exp_box.set_margin_top(8);
@@ -175,6 +194,7 @@ impl QueryTab {
         export_menu_btn.set_sensitive(false);
 
         results_bar.append(&results_status);
+        results_bar.append(&results_hint_lbl);
         results_bar.append(&export_menu_btn);
 
         bottom_box.append(&results_bar);
@@ -203,13 +223,41 @@ impl QueryTab {
             root: paned,
             buffer: buffer.clone(),
             view: view.clone(),
+            results_scroll: results_scroll.clone(),
             results_grid,
             results_status,
             export_menu_btn: export_menu_btn.clone(),
             current_db: Rc::new(RefCell::new(String::new())),
             last_result: Rc::new(RefCell::new(None)),
+            col_widths: Rc::new(RefCell::new(HashMap::new())),
+            natural_col_widths: Rc::new(RefCell::new(Vec::new())),
+            header_cells: Rc::new(RefCell::new(Vec::new())),
+            last_viewport_width: Rc::new(RefCell::new(0)),
+            index_col_width: Rc::new(RefCell::new(DEFAULT_INDEX_COL_WIDTH)),
             cmd_tx,
         };
+
+        // Recompute auto column widths when the results viewport width changes
+        {
+            let tab_clone = tab.clone();
+            results_scroll
+                .hadjustment()
+                .connect_page_size_notify(move |_| {
+                    let tab_for_idle = tab_clone.clone();
+                    gtk::glib::idle_add_local_once(move || {
+                        tab_for_idle.reapply_column_widths_if_viewport_changed();
+                    });
+                });
+        }
+        {
+            let tab_clone = tab.clone();
+            results_scroll.connect_map(move |_| {
+                let tab_for_idle = tab_clone.clone();
+                gtk::glib::idle_add_local_once(move || {
+                    tab_for_idle.reapply_column_widths_if_viewport_changed();
+                });
+            });
+        }
 
         // Update Vim mode & command bar labels
         {
@@ -443,13 +491,85 @@ impl QueryTab {
         });
     }
 
+    fn available_viewport_width(&self) -> i32 {
+        let hadj_w = self.results_scroll.hadjustment().page_size().round() as i32;
+        if hadj_w > 0 {
+            return hadj_w;
+        }
+        let scroll_w = self.results_scroll.width();
+        if scroll_w > 0 {
+            return scroll_w;
+        }
+        let root_w = self.root.width();
+        if root_w > 0 {
+            return root_w;
+        }
+        if let Some(win) = self
+            .root
+            .root()
+            .and_then(|r| r.downcast::<gtk::Window>().ok())
+        {
+            let win_w = win.width();
+            if win_w > 280 {
+                return win_w - 280;
+            }
+        }
+        960
+    }
+
+    fn reapply_column_widths_if_viewport_changed(&self) {
+        let viewport_w = self.available_viewport_width();
+        if viewport_w != *self.last_viewport_width.borrow() {
+            self.apply_column_widths();
+        }
+    }
+
+    fn apply_column_widths(&self) {
+        let viewport_w = self.available_viewport_width();
+        *self.last_viewport_width.borrow_mut() = viewport_w;
+
+        let header_cells = self.header_cells.borrow();
+        let natural_widths = self.natural_col_widths.borrow();
+        if header_cells.is_empty() || header_cells.len() != natural_widths.len() {
+            return;
+        }
+
+        let manual_map = self.col_widths.borrow();
+        let manual_overrides: Vec<Option<i32>> = header_cells
+            .iter()
+            .map(|(col_idx, _)| manual_map.get(col_idx).copied())
+            .collect();
+
+        let idx_w = *self.index_col_width.borrow();
+        let total_avail = (viewport_w - idx_w - 2).max(0);
+        let widths = compute_auto_column_widths(&natural_widths, &manual_overrides, total_avail);
+
+        for ((_, hdr_cell), target_w) in header_cells.iter().zip(widths) {
+            if hdr_cell.width_request() != target_w {
+                hdr_cell.set_width_request(target_w);
+            }
+        }
+    }
+
     pub fn show_outcome(&self, res: Result<RawQueryOutcome, String>) {
         while let Some(child) = self.results_grid.first_child() {
             self.results_grid.remove(&child);
         }
+        self.header_cells.borrow_mut().clear();
+        self.natural_col_widths.borrow_mut().clear();
 
         match res {
             Ok(RawQueryOutcome::Rows(result_set)) => {
+                let cols_changed = self
+                    .last_result
+                    .borrow()
+                    .as_ref()
+                    .map(|prev| prev.columns != result_set.columns)
+                    .unwrap_or(false);
+                if cols_changed {
+                    self.col_widths.borrow_mut().clear();
+                }
+
                 self.results_status.set_text(&format!(
                     "Query Results — {} row(s) returned in {} ms",
                     result_set.rows.len(),
@@ -458,21 +578,67 @@ impl QueryTab {
                 self.export_menu_btn
                     .set_sensitive(!result_set.columns.is_empty());
 
-                // Header row
-                let corner = gtk::Label::new(Some("#"));
-                corner.add_css_class("spreadsheet-header-cell");
-                corner.add_css_class("dim-label");
-                corner.set_width_request(48);
-                self.results_grid.attach(&corner, 0, 0, 1, 1);
+                // Header row (grid row 0)
+                let corner_lbl = gtk::Label::new(Some("#"));
+                corner_lbl.add_css_class("dim-label");
+                corner_lbl.set_halign(gtk::Align::Fill);
+                corner_lbl.set_xalign(0.5);
+                corner_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                corner_lbl.set_max_width_chars(1);
+                corner_lbl.set_margin_top(6);
+                corner_lbl.set_margin_bottom(6);
+
+                let idx_width = *self.index_col_width.borrow();
+                let idx_width_ref = self.index_col_width.clone();
+                let corner_cell = build_resizable_header_cell(
+                    &corner_lbl,
+                    idx_width,
+                    Some("spreadsheet-header-box"),
+                    move |new_w| {
+                        *idx_width_ref.borrow_mut() = new_w;
+                    },
+                );
+                self.results_grid.attach(&corner_cell, 0, 0, 1, 1);
+
+                let mut header_labels: Vec<(gtk::Label, String)> =
+                    Vec::with_capacity(result_set.columns.len());
 
                 for (col_idx, col_name) in result_set.columns.iter().enumerate() {
-                    let hdr = gtk::Label::new(Some(col_name));
-                    hdr.add_css_class("spreadsheet-header-cell");
-                    hdr.add_css_class("heading");
-                    hdr.set_halign(gtk::Align::Start);
-                    hdr.set_width_request(150);
-                    self.results_grid.attach(&hdr, (col_idx + 1) as i32, 0, 1, 1);
+                    let hdr_lbl = gtk::Label::new(Some(col_name));
+                    hdr_lbl.add_css_class("heading");
+                    hdr_lbl.set_halign(gtk::Align::Fill);
+                    hdr_lbl.set_xalign(0.0);
+                    hdr_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                    hdr_lbl.set_max_width_chars(1);
+                    hdr_lbl.set_margin_top(6);
+                    hdr_lbl.set_margin_bottom(6);
+                    hdr_lbl.set_margin_start(10);
+                    hdr_lbl.set_margin_end(6);
+                    hdr_lbl.set_tooltip_text(Some(col_name));
+
+                    let col_w = self
+                        .col_widths
+                        .borrow()
+                        .get(&col_idx)
+                        .copied()
+                        .unwrap_or(DEFAULT_DATA_COL_WIDTH);
+                    let col_widths_ref = self.col_widths.clone();
+                    let hdr_cell = build_resizable_header_cell(
+                        &hdr_lbl,
+                        col_w,
+                        Some("spreadsheet-header-box"),
+                        move |new_w| {
+                            col_widths_ref.borrow_mut().insert(col_idx, new_w);
+                        },
+                    );
+
+                    self.results_grid
+                        .attach(&hdr_cell, (col_idx + 1) as i32, 0, 1, 1);
+                    header_labels.push((hdr_lbl, col_name.clone()));
+                    self.header_cells.borrow_mut().push((col_idx, hdr_cell));
                 }
+
+                let mut sample_entry: Option<gtk::Entry> = None;
 
                 for (row_idx, row_vals) in result_set.rows.iter().enumerate() {
                     let grid_row = (row_idx + 1) as i32;
@@ -481,23 +647,111 @@ impl QueryTab {
                     num_lbl.add_css_class("monospace");
                     num_lbl.add_css_class("caption");
                     num_lbl.add_css_class("dim-label");
+                    num_lbl.set_halign(gtk::Align::Fill);
+                    num_lbl.set_xalign(0.5);
+                    num_lbl.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                    num_lbl.set_max_width_chars(1);
                     self.results_grid.attach(&num_lbl, 0, grid_row, 1, 1);
 
-                    for (col_idx, val) in row_vals.iter().enumerate() {
+                    for col_idx in 0..result_set.columns.len() {
+                        let val = row_vals.get(col_idx).unwrap_or(&DbValue::Null);
+
+                        let cell_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+                        cell_box.add_css_class("spreadsheet-cell");
+                        cell_box.set_overflow(gtk::Overflow::Hidden);
+
                         let cell = gtk::Entry::new();
                         cell.set_has_frame(false);
                         cell.set_editable(false);
-                        cell.add_css_class("spreadsheet-cell");
+                        cell.add_css_class("spreadsheet-cell-entry");
                         cell.add_css_class("monospace");
-                        cell.set_width_chars(16);
-                        cell.set_text(val.display_text());
+                        cell.set_hexpand(true);
+                        cell.set_width_chars(1);
+                        cell.set_max_width_chars(1);
+                        cell.set_text(&format_long_text_preview(val));
                         if val.is_null() {
                             cell.add_css_class("cell-null");
                         }
+
+                        let click = gtk::GestureClick::new();
+                        let entry_weak = cell.downgrade();
+                        click.connect_released(move |_, n_press, _, _| {
+                            if n_press == 1
+                                && let Some(e) = entry_weak.upgrade()
+                            {
+                                let e_clone = e.clone();
+                                gtk::glib::idle_add_local_once(move || {
+                                    e_clone.grab_focus();
+                                    e_clone.select_region(0, -1);
+                                });
+                            }
+                        });
+                        cell.add_controller(click);
+
+                        if sample_entry.is_none() {
+                            sample_entry = Some(cell.clone());
+                        }
+
+                        cell_box.append(&cell);
                         self.results_grid
-                            .attach(&cell, (col_idx + 1) as i32, grid_row, 1, 1);
+                            .attach(&cell_box, (col_idx + 1) as i32, grid_row, 1, 1);
                     }
                 }
+
+                // Compute natural full-content width for each column
+                let mut natural_widths = Vec::with_capacity(result_set.columns.len());
+                for (col_idx, (hdr_lbl, hdr_text)) in header_labels.iter().enumerate() {
+                    let hdr_w =
+                        measure_single_line_text(hdr_lbl, hdr_text) + HEADER_EXTRA_PADDING;
+
+                    let mut widest_val: Option<&DbValue> = None;
+                    let mut max_score: usize = 0;
+
+                    for row_vals in &result_set.rows {
+                        let val = row_vals.get(col_idx).unwrap_or(&DbValue::Null);
+                        let txt = val.display_text();
+                        let score: usize = txt
+                            .chars()
+                            .take(MAX_MEASURE_CHARS)
+                            .map(|c| if c.is_ascii() { 1 } else { 2 })
+                            .sum();
+                        if widest_val.is_none() || score > max_score {
+                            max_score = score;
+                            widest_val = Some(val);
+                        }
+                    }
+
+                    let cell_w = if let Some(val) = widest_val {
+                        let preview = format_long_text_preview(val);
+                        let text_px = if let Some(ref entry_widget) = sample_entry {
+                            measure_single_line_text(entry_widget, &preview)
+                        } else {
+                            measure_single_line_text(hdr_lbl, &preview)
+                        };
+                        let raw_cell_w = text_px + CELL_EXTRA_PADDING;
+                        let is_long = matches!(
+                            val,
+                            DbValue::Text(s) if s.contains('\n') || s.contains('\r') || s.chars().count() > 255
+                        );
+                        if is_long {
+                            raw_cell_w.min(MAX_LONG_TEXT_AUTO_COL_WIDTH)
+                        } else {
+                            raw_cell_w
+                        }
+                    } else {
+                        0
+                    };
+
+                    natural_widths.push(hdr_w.max(cell_w).max(MIN_COLUMN_WIDTH));
+                }
+
+                *self.natural_col_widths.borrow_mut() = natural_widths;
+                self.apply_column_widths();
+
+                let tab_for_idle = self.clone();
+                gtk::glib::idle_add_local_once(move || {
+                    tab_for_idle.reapply_column_widths_if_viewport_changed();
+                });
 
                 *self.last_result.borrow_mut() = Some(result_set);
             }
@@ -569,6 +823,13 @@ impl QueryTab {
             }
         });
     }
+
+    #[cfg(test)]
+    pub fn set_sql_text(&self, sql: &str) {
+        self.buffer.set_text(sql);
+        let end = self.buffer.end_iter();
+        self.buffer.place_cursor(&end);
+    }
 }
 
 fn export_resultset_csv(rs: &RawQueryResultSet, path: &std::path::Path) -> anyhow::Result<()> {
@@ -605,4 +866,210 @@ fn export_resultset_json(rs: &RawQueryResultSet, path: &std::path::Path) -> anyh
     let mut f = File::create(path)?;
     f.write_all(formatted.as_bytes())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_query_results_header_and_column_widths_match() {
+        // Verify that auto column widths and manual overrides work identically for QueryTab
+        let natural = vec![120, 180, 90, 210];
+        let manual = vec![None, Some(240), None, None];
+        let widths = compute_auto_column_widths(&natural, &manual, 800);
+        assert_eq!(widths.len(), 4);
+        assert_eq!(widths[1], 240);
+        assert!(widths.iter().all(|&w| w >= MIN_COLUMN_WIDTH));
+    }
+
+    #[test]
+    #[ignore]
+    fn verify_live_gtk_query_results_column_alignment() {
+        use crate::db::models::TableInfo;
+        use crate::ui::sidebar::WorkspaceSidebar;
+        use crate::ui::workspace::WorkspaceContent;
+        use adw::prelude::*;
+
+        let _ = adw::init();
+        sourceview5::init();
+        crate::app::load_css();
+        adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
+        if let Some(settings) = gtk::Settings::default() {
+            settings.set_gtk_icon_theme_name(Some("Adwaita"));
+        }
+
+        let (cmd_tx, _cmd_rx) = async_channel::unbounded();
+        let sidebar = WorkspaceSidebar::new(cmd_tx.clone());
+        let workspace_content = WorkspaceContent::new(cmd_tx, |_| {});
+
+        let tables = vec![
+            TableInfo { name: "audit_logs".into(), is_view: false },
+            TableInfo { name: "coupons".into(), is_view: false },
+            TableInfo { name: "customers".into(), is_view: false },
+            TableInfo { name: "invoices".into(), is_view: false },
+            TableInfo { name: "order_items".into(), is_view: false },
+            TableInfo { name: "orders".into(), is_view: false },
+            TableInfo { name: "payments".into(), is_view: false },
+            TableInfo { name: "products".into(), is_view: false },
+            TableInfo { name: "shipments".into(), is_view: false },
+            TableInfo { name: "daily_revenue_summary".into(), is_view: true },
+            TableInfo { name: "vip_customer_ltv".into(), is_view: true },
+        ];
+        sidebar.set_connection_state(
+            "Production Store (SSH)",
+            "PostgreSQL (via SSH)",
+            &["commerce_prod".to_string()],
+            Some("commerce_prod"),
+            tables,
+        );
+        sidebar.set_selected_table("orders");
+
+        let split = adw::NavigationSplitView::builder()
+            .sidebar(&sidebar.page)
+            .content(&workspace_content.page)
+            .min_sidebar_width(240.0)
+            .max_sidebar_width(320.0)
+            .build();
+
+        workspace_content.stack.set_visible_child_name("query");
+        workspace_content.query_tab.set_sql_text(
+            "-- Top customers by lifetime order volume (Vim mode: ':r' to run, ':w' to save)\n\
+             SELECT\n  \
+               c.email,\n  \
+               c.full_name,\n  \
+               c.country,\n  \
+               COUNT(o.id) AS total_orders,\n  \
+               SUM(o.total_eur) AS lifetime_revenue_eur,\n  \
+               MAX(o.created_at) AS last_order_at\n\
+             FROM customers c\n\
+             JOIN orders o ON o.customer_id = c.id\n\
+             WHERE o.status IN ('shipped', 'delivered')\n\
+             GROUP BY c.id, c.email, c.full_name, c.country\n\
+             ORDER BY lifetime_revenue_eur DESC\n\
+             LIMIT 6;\n",
+        );
+
+        let rs = RawQueryResultSet {
+            columns: vec![
+                "email".into(),
+                "full_name".into(),
+                "country".into(),
+                "total_orders".into(),
+                "lifetime_revenue_eur".into(),
+                "last_order_at".into(),
+            ],
+            rows: vec![
+                vec![
+                    DbValue::Text("elena.rostova@zurich-labs.ch".into()),
+                    DbValue::Text("Elena Rostova".into()),
+                    DbValue::Text("CH".into()),
+                    DbValue::Text("19".into()),
+                    DbValue::Text("14,820.50".into()),
+                    DbValue::Text("2026-10-14 10:12:04".into()),
+                ],
+                vec![
+                    DbValue::Text("clara.oswald@tardis.co.uk".into()),
+                    DbValue::Text("Clara Oswald".into()),
+                    DbValue::Text("DE".into()),
+                    DbValue::Text("14".into()),
+                    DbValue::Text("6,340.90".into()),
+                    DbValue::Text("2026-10-14 10:25:19".into()),
+                ],
+                vec![
+                    DbValue::Text("hannah.nielsen@windenergy.dk".into()),
+                    DbValue::Text("Hannah Nielsen".into()),
+                    DbValue::Text("AT".into()),
+                    DbValue::Text("11".into()),
+                    DbValue::Text("4,915.20".into()),
+                    DbValue::Text("2026-10-14 11:03:41".into()),
+                ],
+                vec![
+                    DbValue::Text("marcus.vance@cloudscale.io".into()),
+                    DbValue::Text("Marcus Vance".into()),
+                    DbValue::Text("DE".into()),
+                    DbValue::Text("9".into()),
+                    DbValue::Text("3,180.00".into()),
+                    DbValue::Text("2026-10-12 16:40:12".into()),
+                ],
+                vec![
+                    DbValue::Text("jonas.kahnwald@winden-power.de".into()),
+                    DbValue::Text("Jonas Kahnwald".into()),
+                    DbValue::Text("DE".into()),
+                    DbValue::Text("7".into()),
+                    DbValue::Text("2,410.75".into()),
+                    DbValue::Text("2026-10-10 14:05:55".into()),
+                ],
+                vec![
+                    DbValue::Text("lukas.weber@main-logistics.de".into()),
+                    DbValue::Text("Lukas Weber".into()),
+                    DbValue::Text("DE".into()),
+                    DbValue::Text("5".into()),
+                    DbValue::Text("1,690.40".into()),
+                    DbValue::Text("2026-10-08 09:18:30".into()),
+                ],
+            ],
+            execution_time_ms: 4,
+        };
+        workspace_content
+            .query_tab
+            .show_outcome(Ok(RawQueryOutcome::Rows(rs)));
+
+        let win = adw::Window::builder()
+            .title("DBased")
+            .default_width(1440)
+            .default_height(920)
+            .content(&split)
+            .build();
+        win.present();
+
+        let ctx = gtk::glib::MainContext::default();
+        for _ in 0..80 {
+            while ctx.iteration(false) {}
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let grid = &workspace_content.query_tab.results_grid;
+        for col in 0..=6 {
+            let hdr = grid.child_at(col, 0).expect("header widget");
+            let hdr_bounds = hdr.compute_bounds(grid).expect("hdr bounds");
+            assert!(
+                hdr_bounds.width() >= MIN_COLUMN_WIDTH as f32,
+                "col {} hdr_w={}",
+                col,
+                hdr_bounds.width()
+            );
+            for row in 1..=6 {
+                let cell = grid.child_at(col, row).expect("cell widget");
+                let cell_bounds = cell.compute_bounds(grid).expect("cell bounds");
+                assert_eq!(
+                    hdr_bounds.x(),
+                    cell_bounds.x(),
+                    "Column {} header x ({}) != row {} cell x ({})",
+                    col,
+                    hdr_bounds.x(),
+                    row,
+                    cell_bounds.x()
+                );
+                assert_eq!(
+                    hdr_bounds.width(),
+                    cell_bounds.width(),
+                    "Column {} header width ({}) != row {} cell width ({})",
+                    col,
+                    hdr_bounds.width(),
+                    row,
+                    cell_bounds.width()
+                );
+            }
+            println!(
+                "Column {}: hdr_x={} hdr_w={} == cell_w={}",
+                col,
+                hdr_bounds.x(),
+                hdr_bounds.width(),
+                hdr_bounds.width()
+            );
+        }
+
+        win.close();
+    }
 }
