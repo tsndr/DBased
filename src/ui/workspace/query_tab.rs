@@ -2,8 +2,8 @@ use crate::db::models::{BackendCommand, DbValue, RawQueryOutcome, RawQueryResult
 use crate::ui::workspace::{
     CELL_EXTRA_PADDING, DEFAULT_DATA_COL_WIDTH, HEADER_EXTRA_PADDING,
     MAX_LONG_TEXT_AUTO_COL_WIDTH, MAX_MEASURE_CHARS, MIN_COLUMN_WIDTH,
-    build_resizable_header_cell, compute_auto_column_widths, format_long_text_preview,
-    measure_single_line_text,
+    build_resizable_header_cell, build_spreadsheet_scrolled_window, clear_spreadsheet_grid,
+    compute_auto_column_widths, format_long_text_preview, measure_single_line_text,
 };
 use async_channel::Sender;
 use gtk4 as gtk;
@@ -202,13 +202,7 @@ impl QueryTab {
         results_grid.set_halign(gtk::Align::Start);
         results_grid.set_valign(gtk::Align::Start);
 
-        let results_scroll = gtk::ScrolledWindow::builder()
-            .vexpand(true)
-            .hexpand(true)
-            .hscrollbar_policy(gtk::PolicyType::Automatic)
-            .vscrollbar_policy(gtk::PolicyType::Automatic)
-            .child(&results_grid)
-            .build();
+        let results_scroll = build_spreadsheet_scrolled_window(&results_grid);
         bottom_box.append(&results_scroll);
 
         paned.set_start_child(Some(&top_box));
@@ -547,9 +541,10 @@ impl QueryTab {
     }
 
     pub fn show_outcome(&self, res: Result<RawQueryOutcome, String>) {
-        while let Some(child) = self.results_grid.first_child() {
-            self.results_grid.remove(&child);
-        }
+        let saved_h = self.results_scroll.hadjustment().value();
+        let saved_v = self.results_scroll.vadjustment().value();
+
+        clear_spreadsheet_grid(&self.results_grid);
         self.header_cells.borrow_mut().clear();
         self.natural_col_widths.borrow_mut().clear();
 
@@ -735,13 +730,21 @@ impl QueryTab {
                         }
                     } else {
                         0
-                    };
+                    }
+                    ;
 
                     natural_widths.push(hdr_w.max(cell_w).max(MIN_COLUMN_WIDTH));
                 }
 
                 *self.natural_col_widths.borrow_mut() = natural_widths;
                 self.apply_column_widths();
+                if cols_changed {
+                    self.results_scroll.hadjustment().set_value(0.0);
+                    self.results_scroll.vadjustment().set_value(0.0);
+                } else {
+                    self.results_scroll.hadjustment().set_value(saved_h);
+                    self.results_scroll.vadjustment().set_value(saved_v);
+                }
 
                 let tab_for_idle = self.clone();
                 gtk::glib::idle_add_local_once(move || {

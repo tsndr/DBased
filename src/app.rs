@@ -103,6 +103,10 @@ box.spreadsheet-cell {
     background: alpha(@accent_bg_color, 0.14);
 }
 
+.user-row-selected {
+    background: alpha(@accent_bg_color, 0.12);
+}
+
 .spreadsheet-cell-entry {
     border-radius: 0;
     border: none;

@@ -73,6 +73,10 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                 } => {
                     conn_page.set_busy(false, "");
                     workspace_content.structure_tab.set_engine(engine);
+                    workspace_content
+                        .users_tab
+                        .set_connection_context(engine, databases.clone());
+                    workspace_content.users_tab.request_refresh();
                     let init_db = selected_database.as_deref();
                     if let Some(db) = init_db {
                         workspace_content.query_tab.set_database(db);
@@ -103,6 +107,8 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                         workspace_content.content_tab.clear_navigation_history();
                     }
                     workspace_content.query_tab.set_database(new_db);
+                    workspace_content.users_tab.set_databases(databases.clone());
+                    workspace_content.users_tab.request_refresh();
                     let table_names: Vec<String> =
                         tables.iter().map(|t| t.name.clone()).collect();
                     workspace_content.relations_tab.set_all_tables(table_names);
@@ -120,6 +126,7 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                 } => {
                     workspace_content.content_tab.clear_navigation_history();
                     workspace_content.query_tab.set_database(&selected_database);
+                    workspace_content.users_tab.set_databases(databases.clone());
                     let table_names: Vec<String> =
                         tables.iter().map(|t| t.name.clone()).collect();
                     workspace_content.relations_tab.set_all_tables(table_names);
@@ -223,6 +230,36 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                 BackendEvent::TargetTableColumnsLoaded { .. } => {}
                 BackendEvent::RawQueryFinished(outcome) => {
                     workspace_content.query_tab.show_outcome(outcome);
+                }
+                BackendEvent::UsersLoaded {
+                    users,
+                    selected_user,
+                    db_permissions,
+                    toast,
+                } => {
+                    workspace_content.users_tab.set_users_and_permissions(
+                        users,
+                        selected_user,
+                        db_permissions,
+                    );
+                    if let Some(msg) = toast {
+                        show_toast(&msg);
+                    }
+                }
+                BackendEvent::UserDbPermissionsLoaded {
+                    username,
+                    host,
+                    db_permissions,
+                    toast,
+                } => {
+                    workspace_content.users_tab.set_user_db_permissions(
+                        &username,
+                        host,
+                        db_permissions,
+                    );
+                    if let Some(msg) = toast {
+                        show_toast(&msg);
+                    }
                 }
                 BackendEvent::Error(err) => {
                     conn_page.set_busy(false, "");

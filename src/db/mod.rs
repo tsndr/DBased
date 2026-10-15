@@ -698,10 +698,274 @@ pub fn spawn_db_worker() -> (Sender<BackendCommand>, Receiver<BackendEvent>) {
                                 .await;
                         }
                     }
+                    BackendCommand::RefreshUsers { selected_user } => {
+                        if let Some(ref sess) = session {
+                            match load_users_and_permissions(&*sess.driver, selected_user, None)
+                                .await
+                            {
+                                Ok(evt) => {
+                                    let _ = evt_tx.send(evt).await;
+                                }
+                                Err(e) => {
+                                    let _ = evt_tx
+                                        .send(BackendEvent::Error(format!("{:#}", e)))
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+                    BackendCommand::SelectUserForPermissions { username, host } => {
+                        if let Some(ref sess) = session {
+                            match sess
+                                .driver
+                                .get_database_permissions(&username, host.as_deref())
+                                .await
+                            {
+                                Ok(db_permissions) => {
+                                    let _ = evt_tx
+                                        .send(BackendEvent::UserDbPermissionsLoaded {
+                                            username,
+                                            host,
+                                            db_permissions,
+                                            toast: None,
+                                        })
+                                        .await;
+                                }
+                                Err(e) => {
+                                    let _ = evt_tx
+                                        .send(BackendEvent::Error(format!("{:#}", e)))
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+                    BackendCommand::CreateUser(spec) => {
+                        if let Some(ref sess) = session {
+                            let target = (spec.username.trim().to_string(), spec.host.clone());
+                            let label = match &spec.host {
+                                Some(h) if !h.trim().is_empty() => {
+                                    format!("'{}'@'{}'", target.0, h.trim())
+                                }
+                                _ => format!("'{}'", target.0),
+                            };
+                            match sess.driver.create_user(&spec).await {
+                                Ok(()) => {
+                                    match load_users_and_permissions(
+                                        &*sess.driver,
+                                        Some(target),
+                                        Some(format!("Created user {}", label)),
+                                    )
+                                    .await
+                                    {
+                                        Ok(evt) => {
+                                            let _ = evt_tx.send(evt).await;
+                                        }
+                                        Err(e) => {
+                                            let _ = evt_tx
+                                                .send(BackendEvent::Error(format!("{:#}", e)))
+                                                .await;
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    let _ = evt_tx
+                                        .send(BackendEvent::Error(format!("{:#}", e)))
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+                    BackendCommand::UpdateUser(spec) => {
+                        if let Some(ref sess) = session {
+                            let target = (spec.new_username.trim().to_string(), spec.new_host.clone());
+                            let label = match &spec.new_host {
+                                Some(h) if !h.trim().is_empty() => {
+                                    format!("'{}'@'{}'", target.0, h.trim())
+                                }
+                                _ => format!("'{}'", target.0),
+                            };
+                            match sess.driver.update_user(&spec).await {
+                                Ok(()) => {
+                                    match load_users_and_permissions(
+                                        &*sess.driver,
+                                        Some(target),
+                                        Some(format!("Updated user {}", label)),
+                                    )
+                                    .await
+                                    {
+                                        Ok(evt) => {
+                                            let _ = evt_tx.send(evt).await;
+                                        }
+                                        Err(e) => {
+                                            let _ = evt_tx
+                                                .send(BackendEvent::Error(format!("{:#}", e)))
+                                                .await;
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    let _ = evt_tx
+                                        .send(BackendEvent::Error(format!("{:#}", e)))
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+                    BackendCommand::DropUser { username, host } => {
+                        if let Some(ref sess) = session {
+                            let label = match &host {
+                                Some(h) if !h.trim().is_empty() => {
+                                    format!("'{}'@'{}'", username, h.trim())
+                                }
+                                _ => format!("'{}'", username),
+                            };
+                            match sess.driver.drop_user(&username, host.as_deref()).await {
+                                Ok(()) => {
+                                    match load_users_and_permissions(
+                                        &*sess.driver,
+                                        None,
+                                        Some(format!("Dropped user {}", label)),
+                                    )
+                                    .await
+                                    {
+                                        Ok(evt) => {
+                                            let _ = evt_tx.send(evt).await;
+                                        }
+                                        Err(e) => {
+                                            let _ = evt_tx
+                                                .send(BackendEvent::Error(format!("{:#}", e)))
+                                                .await;
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    let _ = evt_tx
+                                        .send(BackendEvent::Error(format!("{:#}", e)))
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+                    BackendCommand::SetDatabasePermissions(spec) => {
+                        if let Some(ref sess) = session {
+                            let username = spec.username.clone();
+                            let host = spec.host.clone();
+                            let db = spec.database.clone();
+                            match sess.driver.set_database_permissions(&spec).await {
+                                Ok(()) => {
+                                    match sess
+                                        .driver
+                                        .get_database_permissions(&username, host.as_deref())
+                                        .await
+                                    {
+                                        Ok(db_permissions) => {
+                                            let _ = evt_tx
+                                                .send(BackendEvent::UserDbPermissionsLoaded {
+                                                    username,
+                                                    host,
+                                                    db_permissions,
+                                                    toast: Some(format!(
+                                                        "Updated permissions on '{}'",
+                                                        db
+                                                    )),
+                                                })
+                                                .await;
+                                        }
+                                        Err(e) => {
+                                            let _ = evt_tx
+                                                .send(BackendEvent::Error(format!("{:#}", e)))
+                                                .await;
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    let _ = evt_tx
+                                        .send(BackendEvent::Error(format!("{:#}", e)))
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+                    BackendCommand::RevokeDatabasePermissions {
+                        username,
+                        host,
+                        database,
+                    } => {
+                        if let Some(ref sess) = session {
+                            match sess
+                                .driver
+                                .revoke_database_permissions(&username, host.as_deref(), &database)
+                                .await
+                            {
+                                Ok(()) => {
+                                    match sess
+                                        .driver
+                                        .get_database_permissions(&username, host.as_deref())
+                                        .await
+                                    {
+                                        Ok(db_permissions) => {
+                                            let _ = evt_tx
+                                                .send(BackendEvent::UserDbPermissionsLoaded {
+                                                    username,
+                                                    host,
+                                                    db_permissions,
+                                                    toast: Some(format!(
+                                                        "Revoked permissions on '{}'",
+                                                        database
+                                                    )),
+                                                })
+                                                .await;
+                                        }
+                                        Err(e) => {
+                                            let _ = evt_tx
+                                                .send(BackendEvent::Error(format!("{:#}", e)))
+                                                .await;
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    let _ = evt_tx
+                                        .send(BackendEvent::Error(format!("{:#}", e)))
+                                        .await;
+                                }
+                            }
+                        }
+                    }
                 }
             }
         });
     });
 
     (cmd_tx, evt_rx)
+}
+
+async fn load_users_and_permissions(
+    driver: &dyn DatabaseDriver,
+    preferred_user: Option<(String, Option<String>)>,
+    toast: Option<String>,
+) -> Result<BackendEvent> {
+    let users = driver.list_users().await?;
+    let selected_user = preferred_user
+        .filter(|(u, h)| users.iter().any(|du| &du.username == u && &du.host == h))
+        .or_else(|| {
+            users
+                .first()
+                .map(|du| (du.username.clone(), du.host.clone()))
+        });
+
+    let db_permissions = if let Some((ref u, ref h)) = selected_user {
+        driver
+            .get_database_permissions(u, h.as_deref())
+            .await
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    Ok(BackendEvent::UsersLoaded {
+        users,
+        selected_user,
+        db_permissions,
+        toast,
+    })
 }

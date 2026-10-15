@@ -1,8 +1,8 @@
 use crate::db::models::{BackendCommand, ForeignKeyInfo, NewForeignKey};
 use crate::ui::workspace::{
     CELL_EXTRA_PADDING, DEFAULT_DATA_COL_WIDTH, HEADER_EXTRA_PADDING, MIN_COLUMN_WIDTH,
-    build_resizable_header_cell, compute_auto_column_widths, create_spreadsheet_label_cell,
-    measure_single_line_text,
+    build_resizable_header_cell, build_spreadsheet_scrolled_window, clear_spreadsheet_grid,
+    compute_auto_column_widths, create_spreadsheet_label_cell, measure_single_line_text,
 };
 use adw::prelude::*;
 use async_channel::Sender;
@@ -87,13 +87,7 @@ impl RelationsTab {
         grid.set_halign(gtk::Align::Start);
         grid.set_valign(gtk::Align::Start);
 
-        let scroll = gtk::ScrolledWindow::builder()
-            .vexpand(true)
-            .hexpand(true)
-            .hscrollbar_policy(gtk::PolicyType::Automatic)
-            .vscrollbar_policy(gtk::PolicyType::Automatic)
-            .child(&grid)
-            .build();
+        let scroll = build_spreadsheet_scrolled_window(&grid);
 
         root.append(&scroll);
 
@@ -264,6 +258,8 @@ impl RelationsTab {
             || *self.current_table.borrow() != table;
         if table_changed {
             self.col_widths.borrow_mut().clear();
+            self.scroll.hadjustment().set_value(0.0);
+            self.scroll.vadjustment().set_value(0.0);
         }
         *self.current_db.borrow_mut() = database.to_string();
         *self.current_table.borrow_mut() = table.to_string();
@@ -272,6 +268,9 @@ impl RelationsTab {
     }
 
     fn render_grid(&self) {
+        let saved_h = self.scroll.hadjustment().value();
+        let saved_v = self.scroll.vadjustment().value();
+
         let table = self.current_table.borrow().clone();
         let relations = self.relations.borrow().clone();
 
@@ -288,9 +287,7 @@ impl RelationsTab {
         self.add_btn.set_sensitive(!table.is_empty());
         self.refresh_btn.set_sensitive(!table.is_empty());
 
-        while let Some(child) = self.grid.first_child() {
-            self.grid.remove(&child);
-        }
+        clear_spreadsheet_grid(&self.grid);
         self.header_cells.borrow_mut().clear();
         self.natural_col_widths.borrow_mut().clear();
 
@@ -424,6 +421,7 @@ impl RelationsTab {
             drop_btn.add_css_class("cell-action-btn");
             drop_btn.set_valign(gtk::Align::Center);
             drop_btn.set_margin_start(6);
+            drop_btn.set_focus_on_click(false);
             drop_btn.set_tooltip_text(Some("Delete Foreign Key Relation"));
 
             action_cell.append(&drop_btn);
@@ -469,6 +467,8 @@ impl RelationsTab {
 
         *self.natural_col_widths.borrow_mut() = natural_widths;
         self.apply_column_widths();
+        self.scroll.hadjustment().set_value(saved_h);
+        self.scroll.vadjustment().set_value(saved_v);
 
         let tab_for_idle = self.clone();
         gtk::glib::idle_add_local_once(move || {

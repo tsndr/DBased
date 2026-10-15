@@ -6,8 +6,8 @@ use crate::db::models::{
 use crate::ui::workspace::{
     CELL_EXTRA_PADDING, DEFAULT_DATA_COL_WIDTH, HEADER_EXTRA_PADDING,
     MAX_LONG_TEXT_AUTO_COL_WIDTH, MAX_MEASURE_CHARS, MIN_COLUMN_WIDTH,
-    build_resizable_header_cell, compute_auto_column_widths, format_long_text_preview,
-    measure_single_line_text,
+    build_resizable_header_cell, build_spreadsheet_scrolled_window, clear_spreadsheet_grid,
+    compute_auto_column_widths, format_long_text_preview, measure_single_line_text,
 };
 use adw::prelude::*;
 use async_channel::Sender;
@@ -222,13 +222,7 @@ impl ContentTab {
         grid.set_halign(gtk::Align::Start);
         grid.set_valign(gtk::Align::Start);
 
-        let scroll = gtk::ScrolledWindow::builder()
-            .vexpand(true)
-            .hexpand(true)
-            .hscrollbar_policy(gtk::PolicyType::Automatic)
-            .vscrollbar_policy(gtk::PolicyType::Automatic)
-            .child(&grid)
-            .build();
+        let scroll = build_spreadsheet_scrolled_window(&grid);
 
         // Separate Multiline Editor Panel for Long Text Columns
         let editor_panel = gtk::Box::new(gtk::Orientation::Vertical, 0);
@@ -1269,6 +1263,8 @@ impl ContentTab {
             .unwrap_or(false);
         if table_changed {
             self.col_widths.borrow_mut().clear();
+            self.scroll.hadjustment().set_value(0.0);
+            self.scroll.vadjustment().set_value(0.0);
         }
 
         self.close_long_text_panel();
@@ -1356,10 +1352,11 @@ impl ContentTab {
     }
 
     fn render_grid(&self) {
+        let saved_h = self.scroll.hadjustment().value();
+        let saved_v = self.scroll.vadjustment().value();
+
         self.close_long_text_panel();
-        while let Some(child) = self.grid.first_child() {
-            self.grid.remove(&child);
-        }
+        clear_spreadsheet_grid(&self.grid);
         self.selected_rows.borrow_mut().clear();
         self.header_cells.borrow_mut().clear();
         self.natural_col_widths.borrow_mut().clear();
@@ -1419,6 +1416,7 @@ impl ContentTab {
             let hdr_btn = gtk::Button::new();
             hdr_btn.set_child(Some(&hdr_lbl));
             hdr_btn.add_css_class("spreadsheet-header-btn");
+            hdr_btn.set_focus_on_click(false);
             let tooltip = if let Some(fk) = fk_opt {
                 format!(
                     "{} ({}) → {}.{} — Click to sort",
@@ -1487,6 +1485,7 @@ impl ContentTab {
             let check = gtk::CheckButton::new();
             let row_editable = has_pk && row_data.pk.is_some();
             check.set_sensitive(row_editable);
+            check.set_focus_on_click(false);
             let num_lbl =
                 gtk::Label::new(Some(&(page.page_offset as usize + row_idx + 1).to_string()));
             num_lbl.add_css_class("monospace");
@@ -1773,6 +1772,8 @@ impl ContentTab {
 
         *self.natural_col_widths.borrow_mut() = natural_widths;
         self.apply_column_widths();
+        self.scroll.hadjustment().set_value(saved_h);
+        self.scroll.vadjustment().set_value(saved_v);
 
         let tab_for_idle = self.clone();
         gtk::glib::idle_add_local_once(move || {
@@ -2037,6 +2038,14 @@ impl ContentTab {
         self.attach_draft_row_widgets(grid_row, draft_idx, &page.columns, &initial_map);
         self.apply_column_widths();
         self.update_dirty_badge();
+
+        let scroll_for_idle = self.scroll.clone();
+        gtk::glib::idle_add_local_once(move || {
+            scroll_for_idle.hadjustment().set_value(0.0);
+            let vadj = scroll_for_idle.vadjustment();
+            let bottom = (vadj.upper() - vadj.page_size()).max(vadj.lower());
+            vadj.set_value(bottom);
+        });
     }
 
     fn attach_draft_row_widgets(

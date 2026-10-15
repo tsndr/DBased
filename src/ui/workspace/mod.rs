@@ -2,12 +2,14 @@ pub mod content_tab;
 pub mod query_tab;
 pub mod relations_tab;
 pub mod structure_tab;
+pub mod users_tab;
 
 use crate::db::models::BackendCommand;
 use crate::ui::workspace::content_tab::ContentTab;
 use crate::ui::workspace::query_tab::QueryTab;
 use crate::ui::workspace::relations_tab::RelationsTab;
 use crate::ui::workspace::structure_tab::StructureTab;
+use crate::ui::workspace::users_tab::UsersTab;
 use async_channel::Sender;
 use libadwaita as adw;
 
@@ -19,6 +21,7 @@ pub struct WorkspaceContent {
     pub content_tab: ContentTab,
     pub relations_tab: RelationsTab,
     pub query_tab: QueryTab,
+    pub users_tab: UsersTab,
 }
 
 impl WorkspaceContent {
@@ -34,7 +37,8 @@ impl WorkspaceContent {
         let structure_tab = StructureTab::new(cmd_tx.clone());
         let content_tab = ContentTab::new(cmd_tx.clone(), on_toast.clone());
         let relations_tab = RelationsTab::new(cmd_tx.clone());
-        let query_tab = QueryTab::new(cmd_tx, on_toast);
+        let query_tab = QueryTab::new(cmd_tx.clone(), on_toast);
+        let users_tab = UsersTab::new(cmd_tx);
 
         stack.add_titled_with_icon(
             &structure_tab.root,
@@ -59,6 +63,12 @@ impl WorkspaceContent {
             Some("query"),
             "Query",
             "utilities-terminal-symbolic",
+        );
+        stack.add_titled_with_icon(
+            &users_tab.root,
+            Some("users"),
+            "Users",
+            "system-users-symbolic",
         );
 
         // Default to Content tab when browsing tables
@@ -85,6 +95,7 @@ impl WorkspaceContent {
             content_tab,
             relations_tab,
             query_tab,
+            users_tab,
         }
     }
 }
@@ -369,3 +380,42 @@ pub fn create_spreadsheet_label_cell(
     cell_box.append(&lbl);
     (cell_box, lbl)
 }
+
+/// Creates a `gtk::ScrolledWindow` wrapping a spreadsheet `gtk::Grid` with `scroll-to-focus`
+/// disabled on its `gtk::Viewport`, preventing GTK4 focus changes or grid rebuilds from
+/// unexpectedly resetting horizontal or vertical scroll positions.
+pub fn build_spreadsheet_scrolled_window(grid: &gtk4::Grid) -> gtk4::ScrolledWindow {
+    use gtk4 as gtk;
+
+    let viewport = gtk::Viewport::builder()
+        .scroll_to_focus(false)
+        .child(grid)
+        .build();
+
+    gtk::ScrolledWindow::builder()
+        .vexpand(true)
+        .hexpand(true)
+        .hscrollbar_policy(gtk::PolicyType::Automatic)
+        .vscrollbar_policy(gtk::PolicyType::Automatic)
+        .child(&viewport)
+        .build()
+}
+
+/// Clears all children from a spreadsheet `gtk::Grid`, first unsetting window focus if the
+/// currently focused widget is inside `grid` so GTK4's window focus repair does not arbitrarily
+/// focus row 1 / column 1 after the grid is rebuilt.
+pub fn clear_spreadsheet_grid(grid: &gtk4::Grid) {
+    use gtk4::prelude::*;
+
+    if let Some(root) = grid.root() {
+        if let Some(focused) = root.focus() {
+            if focused == *grid || focused.is_ancestor(grid) {
+                gtk4::prelude::RootExt::set_focus(&root, None::<&gtk4::Widget>);
+            }
+        }
+    }
+    while let Some(child) = grid.first_child() {
+        grid.remove(&child);
+    }
+}
+

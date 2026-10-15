@@ -268,6 +268,289 @@ impl MySqlDriver {
         }
         Ok(parts.join(" "))
     }
+
+    fn format_account(username: &str, host: Option<&str>) -> Result<String> {
+        let user = username.trim();
+        if user.is_empty() {
+            return Err(anyhow!("Username cannot be empty"));
+        }
+        let h = host
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("%");
+        Ok(format!(
+            "{}@{}",
+            escape_sql_literal(&DbValue::Text(user.to_string())),
+            escape_sql_literal(&DbValue::Text(h.to_string()))
+        ))
+    }
+
+    fn sanitize_privileges(privs: &[String], allowed: &[&str]) -> Result<Vec<String>> {
+        let mut out = Vec::new();
+        for p in privs {
+            let up = p.trim().to_ascii_uppercase();
+            if up.is_empty() || up == "USAGE" {
+                continue;
+            }
+            if up == "ALL PRIVILEGES" || up == "ALL" {
+                return Ok(allowed.iter().map(|s| (*s).to_string()).collect());
+            }
+            if allowed.iter().any(|&a| a == up) {
+                if !out.contains(&up) {
+                    out.push(up);
+                }
+            } else {
+                return Err(anyhow!("Unsupported MySQL privilege '{}'", p));
+            }
+        }
+        Ok(out)
+    }
+
+    fn format_privilege_clause(privs: &[String], allowed: &[&str]) -> String {
+        if privs.len() >= allowed.len()
+            && allowed
+                .iter()
+                .all(|&a| privs.iter().any(|p| p.eq_ignore_ascii_case(a)))
+        {
+            "ALL PRIVILEGES".to_string()
+        } else {
+            privs.join(", ")
+        }
+    }
+
+    fn format_create_user_stmts(spec: &CreateUserSpec) -> Result<Vec<String>> {
+        let account = Self::format_account(&spec.username, spec.host.as_deref())?;
+        let privs = Self::sanitize_privileges(&spec.global_privileges, MYSQL_GLOBAL_PRIVILEGES)?;
+        let mut stmts = vec![format!(
+            "CREATE USER {} IDENTIFIED BY {}",
+            account,
+            escape_sql_literal(&DbValue::Text(spec.password.clone()))
+        )];
+
+        if !privs.is_empty() {
+            let priv_clause = Self::format_privilege_clause(&privs, MYSQL_GLOBAL_PRIVILEGES);
+            let grant_opt = if spec.with_grant_option {
+                " WITH GRANT OPTION"
+            } else {
+                ""
+            };
+            stmts.push(format!(
+                "GRANT {} ON *.* TO {}{}",
+                priv_clause, account, grant_opt
+            ));
+        }
+
+        Ok(stmts)
+    }
+
+    fn format_update_user_stmts(spec: &UpdateUserSpec) -> Result<Vec<String>> {
+        let old_account = Self::format_account(&spec.old_username, spec.old_host.as_deref())?;
+        let new_account = Self::format_account(&spec.new_username, spec.new_host.as_deref())?;
+        let privs = Self::sanitize_privileges(&spec.global_privileges, MYSQL_GLOBAL_PRIVILEGES)?;
+
+        let mut stmts = Vec::new();
+        if old_account != new_account {
+            stmts.push(format!("RENAME USER {} TO {}", old_account, new_account));
+        }
+        if let Some(pwd) = &spec.new_password {
+            if !pwd.is_empty() {
+                stmts.push(format!(
+                    "ALTER USER {} IDENTIFIED BY {}",
+                    new_account,
+                    escape_sql_literal(&DbValue::Text(pwd.clone()))
+                ));
+            }
+        }
+
+        stmts.push(format!(
+            "REVOKE ALL PRIVILEGES ON *.* FROM {}",
+            new_account
+        ));
+        stmts.push(format!("REVOKE GRANT OPTION ON *.* FROM {}", new_account));
+
+        if !privs.is_empty() {
+            let priv_clause = Self::format_privilege_clause(&privs, MYSQL_GLOBAL_PRIVILEGES);
+            let grant_opt = if spec.with_grant_option {
+                " WITH GRANT OPTION"
+            } else {
+                ""
+            };
+            stmts.push(format!(
+                "GRANT {} ON *.* TO {}{}",
+                priv_clause, new_account, grant_opt
+            ));
+        }
+
+        Ok(stmts)
+    }
+
+    fn format_drop_user_stmt(username: &str, host: Option<&str>) -> Result<String> {
+        let account = Self::format_account(username, host)?;
+        Ok(format!("DROP USER {}", account))
+    }
+
+    fn format_set_db_permissions_stmts(spec: &DbPermissionSpec) -> Result<Vec<String>> {
+        let account = Self::format_account(&spec.username, spec.host.as_deref())?;
+        let db = spec.database.trim();
+        if db.is_empty() {
+            return Err(anyhow!("Database name cannot be empty"));
+        }
+        let privs = Self::sanitize_privileges(&spec.privileges, MYSQL_DB_PRIVILEGES)?;
+        let quoted_db = quote_mysql_ident(db);
+
+        let mut stmts = vec![
+            format!("REVOKE ALL PRIVILEGES ON {}.* FROM {}", quoted_db, account),
+            format!("REVOKE GRANT OPTION ON {}.* FROM {}", quoted_db, account),
+        ];
+
+        if !privs.is_empty() {
+            let priv_clause = Self::format_privilege_clause(&privs, MYSQL_DB_PRIVILEGES);
+            let grant_opt = if spec.with_grant_option {
+                " WITH GRANT OPTION"
+            } else {
+                ""
+            };
+            stmts.push(format!(
+                "GRANT {} ON {}.* TO {}{}",
+                priv_clause, quoted_db, account, grant_opt
+            ));
+        }
+
+        Ok(stmts)
+    }
+
+    fn format_revoke_db_permissions_stmts(
+        username: &str,
+        host: Option<&str>,
+        database: &str,
+    ) -> Result<Vec<String>> {
+        let account = Self::format_account(username, host)?;
+        let db = database.trim();
+        if db.is_empty() {
+            return Err(anyhow!("Database name cannot be empty"));
+        }
+        let quoted_db = quote_mysql_ident(db);
+        Ok(vec![
+            format!("REVOKE ALL PRIVILEGES ON {}.* FROM {}", quoted_db, account),
+            format!("REVOKE GRANT OPTION ON {}.* FROM {}", quoted_db, account),
+        ])
+    }
+
+    fn parse_mysql_grants(
+        username: &str,
+        host: &str,
+        grant_lines: &[String],
+    ) -> (Vec<String>, bool, Vec<DatabasePermission>) {
+        use std::collections::BTreeMap;
+
+        let mut global_privs = Vec::<String>::new();
+        let mut global_grant_opt = false;
+        let mut db_map: BTreeMap<String, (Vec<String>, bool)> = BTreeMap::new();
+
+        for line in grant_lines {
+            let trimmed = line.trim();
+            let upper = trimmed.to_ascii_uppercase();
+            if !upper.starts_with("GRANT ") {
+                continue;
+            }
+            let Some(on_idx) = upper.find(" ON ") else {
+                continue;
+            };
+            let privs_part = &trimmed[6..on_idx];
+            let after_on = &trimmed[on_idx + 4..];
+            let after_on_upper = after_on.to_ascii_uppercase();
+            let Some(to_idx) = after_on_upper.find(" TO ") else {
+                continue;
+            };
+            let target_part = after_on[..to_idx].trim();
+            let tail_upper = &after_on_upper[to_idx + 4..];
+            let has_grant_option = tail_upper.contains("WITH GRANT OPTION");
+
+            let raw_tokens: Vec<String> = privs_part
+                .split(',')
+                .map(|t| t.trim().to_ascii_uppercase())
+                .filter(|t| !t.is_empty() && t != "USAGE")
+                .collect();
+
+            if target_part == "*.*" {
+                if has_grant_option {
+                    global_grant_opt = true;
+                }
+                for tok in raw_tokens {
+                    if tok == "ALL PRIVILEGES" || tok == "ALL" {
+                        for &p in MYSQL_GLOBAL_PRIVILEGES {
+                            let s = p.to_string();
+                            if !global_privs.contains(&s) {
+                                global_privs.push(s);
+                            }
+                        }
+                    } else if MYSQL_GLOBAL_PRIVILEGES.contains(&tok.as_str())
+                        && !global_privs.contains(&tok)
+                    {
+                        global_privs.push(tok);
+                    }
+                }
+            } else if let Some(raw_db) = target_part.strip_suffix(".*") {
+                let unquoted_db = raw_db
+                    .trim()
+                    .trim_matches(|c| c == '`' || c == '\'' || c == '"')
+                    .replace("``", "`")
+                    .replace("\\_", "_")
+                    .replace("\\%", "%");
+                if unquoted_db.is_empty() || unquoted_db == "*" {
+                    continue;
+                }
+                let entry = db_map
+                    .entry(unquoted_db)
+                    .or_insert_with(|| (Vec::new(), false));
+                if has_grant_option {
+                    entry.1 = true;
+                }
+                for tok in raw_tokens {
+                    if tok == "ALL PRIVILEGES" || tok == "ALL" {
+                        for &p in MYSQL_DB_PRIVILEGES {
+                            let s = p.to_string();
+                            if !entry.0.contains(&s) {
+                                entry.0.push(s);
+                            }
+                        }
+                    } else if MYSQL_DB_PRIVILEGES.contains(&tok.as_str())
+                        && !entry.0.contains(&tok)
+                    {
+                        entry.0.push(tok);
+                    }
+                }
+            }
+        }
+
+        let db_permissions = db_map
+            .into_iter()
+            .filter(|(_, (privs, _))| !privs.is_empty())
+            .map(|(database, (privileges, has_grant_option))| DatabasePermission {
+                username: username.to_string(),
+                host: Some(host.to_string()),
+                database,
+                privileges,
+                has_grant_option,
+            })
+            .collect();
+
+        (global_privs, global_grant_opt, db_permissions)
+    }
+
+    async fn fetch_grants_for_account(&self, pool: &MySqlPool, account: &str) -> Vec<String> {
+        let sql = format!("SHOW GRANTS FOR {}", account);
+        match sqlx::raw_sql(&sql).fetch_all(pool).await {
+            Ok(rows) => rows
+                .into_iter()
+                .filter_map(|r| match decode_mysql_cell(&r, 0) {
+                    DbValue::Text(s) => Some(s),
+                    DbValue::Null => None,
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
 }
 
 fn decode_mysql_cell(row: &MySqlRow, idx: usize) -> DbValue {
@@ -929,6 +1212,139 @@ impl DatabaseDriver for MySqlDriver {
             })
         }
     }
+
+    async fn list_users(&self) -> Result<Vec<DbUser>> {
+        let pool = self.pool_for_db("").await?;
+        let user_rows = match sqlx::raw_sql(
+            "SELECT CAST(User AS CHAR), CAST(Host AS CHAR) FROM mysql.user ORDER BY User, Host",
+        )
+        .fetch_all(&pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(_) => {
+                sqlx::raw_sql(
+                    "SELECT SUBSTRING_INDEX(CURRENT_USER(), '@', 1), SUBSTRING_INDEX(CURRENT_USER(), '@', -1)",
+                )
+                .fetch_all(&pool)
+                .await
+                .context("Failed to list MySQL users")?
+            }
+        };
+
+        let mut users = Vec::with_capacity(user_rows.len());
+        for row in user_rows {
+            let username = decode_mysql_cell(&row, 0).display_text().trim().to_string();
+            let host = decode_mysql_cell(&row, 1).display_text().trim().to_string();
+            if username.is_empty() {
+                continue;
+            }
+            let account = Self::format_account(&username, Some(&host))?;
+            let grant_lines = self.fetch_grants_for_account(&pool, &account).await;
+            let (global_privileges, has_grant_option, _) =
+                Self::parse_mysql_grants(&username, &host, &grant_lines);
+            users.push(DbUser {
+                username,
+                host: Some(host),
+                global_privileges,
+                has_grant_option,
+            });
+        }
+        Ok(users)
+    }
+
+    async fn create_user(&self, spec: &CreateUserSpec) -> Result<()> {
+        let pool = self.pool_for_db("").await?;
+        let stmts = Self::format_create_user_stmts(spec)?;
+        for sql in stmts {
+            sqlx::raw_sql(&sql)
+                .execute(&pool)
+                .await
+                .with_context(|| format!("Failed to execute: {}", sql))?;
+        }
+        let _ = sqlx::raw_sql("FLUSH PRIVILEGES").execute(&pool).await;
+        Ok(())
+    }
+
+    async fn update_user(&self, spec: &UpdateUserSpec) -> Result<()> {
+        let pool = self.pool_for_db("").await?;
+        let stmts = Self::format_update_user_stmts(spec)?;
+        for sql in stmts {
+            if let Err(e) = sqlx::raw_sql(&sql).execute(&pool).await {
+                let err_str = format!("{:#}", e).to_ascii_lowercase();
+                if sql.starts_with("REVOKE ") && err_str.contains("no such grant") {
+                    continue;
+                }
+                return Err(e).with_context(|| format!("Failed to execute: {}", sql));
+            }
+        }
+        let _ = sqlx::raw_sql("FLUSH PRIVILEGES").execute(&pool).await;
+        Ok(())
+    }
+
+    async fn drop_user(&self, username: &str, host: Option<&str>) -> Result<()> {
+        let pool = self.pool_for_db("").await?;
+        let sql = Self::format_drop_user_stmt(username, host)?;
+        sqlx::raw_sql(&sql)
+            .execute(&pool)
+            .await
+            .with_context(|| format!("Failed to drop user: {}", sql))?;
+        let _ = sqlx::raw_sql("FLUSH PRIVILEGES").execute(&pool).await;
+        Ok(())
+    }
+
+    async fn get_database_permissions(
+        &self,
+        username: &str,
+        host: Option<&str>,
+    ) -> Result<Vec<DatabasePermission>> {
+        let pool = self.pool_for_db("").await?;
+        let h = host
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("%");
+        let account = Self::format_account(username, Some(h))?;
+        let grant_lines = self.fetch_grants_for_account(&pool, &account).await;
+        let (_, _, db_permissions) = Self::parse_mysql_grants(username.trim(), h, &grant_lines);
+        Ok(db_permissions)
+    }
+
+    async fn set_database_permissions(&self, spec: &DbPermissionSpec) -> Result<()> {
+        let pool = self.pool_for_db("").await?;
+        let stmts = Self::format_set_db_permissions_stmts(spec)?;
+        for sql in stmts {
+            if let Err(e) = sqlx::raw_sql(&sql).execute(&pool).await {
+                let err_str = format!("{:#}", e).to_ascii_lowercase();
+                if sql.starts_with("REVOKE ") && err_str.contains("no such grant") {
+                    continue;
+                }
+                return Err(e).with_context(|| format!("Failed to execute: {}", sql));
+            }
+        }
+        let _ = sqlx::raw_sql("FLUSH PRIVILEGES").execute(&pool).await;
+        Ok(())
+    }
+
+    async fn revoke_database_permissions(
+        &self,
+        username: &str,
+        host: Option<&str>,
+        database: &str,
+    ) -> Result<()> {
+        let pool = self.pool_for_db("").await?;
+        let stmts = Self::format_revoke_db_permissions_stmts(username, host, database)?;
+        for sql in stmts {
+            if let Err(e) = sqlx::raw_sql(&sql).execute(&pool).await {
+                let err_str = format!("{:#}", e).to_ascii_lowercase();
+                if err_str.contains("no such grant") {
+                    continue;
+                }
+                return Err(e).with_context(|| format!("Failed to execute: {}", sql));
+            }
+        }
+        let _ = sqlx::raw_sql("FLUSH PRIVILEGES").execute(&pool).await;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1060,5 +1476,84 @@ mod tests {
             template: None,
         };
         assert!(MySqlDriver::format_create_database_stmt(&empty).is_err());
+    }
+
+    #[test]
+    fn test_mysql_user_and_permission_sql_formatting() {
+        let create_spec = CreateUserSpec {
+            username: "app_reader".to_string(),
+            host: Some("%".to_string()),
+            password: "s3cr'et".to_string(),
+            global_privileges: vec!["SELECT".to_string(), "SHOW VIEW".to_string()],
+            with_grant_option: false,
+        };
+        assert_eq!(
+            MySqlDriver::format_create_user_stmts(&create_spec).unwrap(),
+            vec![
+                "CREATE USER 'app_reader'@'%' IDENTIFIED BY 's3cr''et'",
+                "GRANT SELECT, SHOW VIEW ON *.* TO 'app_reader'@'%'"
+            ]
+        );
+
+        let update_spec = UpdateUserSpec {
+            old_username: "app_reader".to_string(),
+            old_host: Some("%".to_string()),
+            new_username: "app_writer".to_string(),
+            new_host: Some("localhost".to_string()),
+            new_password: Some("newpass".to_string()),
+            global_privileges: vec!["SELECT".to_string(), "INSERT".to_string()],
+            with_grant_option: true,
+        };
+        assert_eq!(
+            MySqlDriver::format_update_user_stmts(&update_spec).unwrap(),
+            vec![
+                "RENAME USER 'app_reader'@'%' TO 'app_writer'@'localhost'",
+                "ALTER USER 'app_writer'@'localhost' IDENTIFIED BY 'newpass'",
+                "REVOKE ALL PRIVILEGES ON *.* FROM 'app_writer'@'localhost'",
+                "REVOKE GRANT OPTION ON *.* FROM 'app_writer'@'localhost'",
+                "GRANT SELECT, INSERT ON *.* TO 'app_writer'@'localhost' WITH GRANT OPTION"
+            ]
+        );
+
+        let db_perm = DbPermissionSpec {
+            username: "app_writer".to_string(),
+            host: Some("localhost".to_string()),
+            database: "commerce_prod".to_string(),
+            privileges: vec![
+                "SELECT".to_string(),
+                "INSERT".to_string(),
+                "UPDATE".to_string(),
+            ],
+            with_grant_option: false,
+        };
+        assert_eq!(
+            MySqlDriver::format_set_db_permissions_stmts(&db_perm).unwrap(),
+            vec![
+                "REVOKE ALL PRIVILEGES ON `commerce_prod`.* FROM 'app_writer'@'localhost'",
+                "REVOKE GRANT OPTION ON `commerce_prod`.* FROM 'app_writer'@'localhost'",
+                "GRANT SELECT, INSERT, UPDATE ON `commerce_prod`.* TO 'app_writer'@'localhost'"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_mysql_grants() {
+        let lines = vec![
+            "GRANT SELECT, PROCESS ON *.* TO `reporter`@`%`".to_string(),
+            "GRANT SELECT, INSERT, UPDATE ON `shop\\_db`.* TO `reporter`@`%` WITH GRANT OPTION"
+                .to_string(),
+            "GRANT ALL PRIVILEGES ON `analytics`.* TO `reporter`@`%`".to_string(),
+        ];
+        let (global_privs, global_grant_opt, db_perms) =
+            MySqlDriver::parse_mysql_grants("reporter", "%", &lines);
+        assert_eq!(global_privs, vec!["SELECT", "PROCESS"]);
+        assert!(!global_grant_opt);
+        assert_eq!(db_perms.len(), 2);
+        assert_eq!(db_perms[0].database, "analytics");
+        assert_eq!(db_perms[0].privileges.len(), MYSQL_DB_PRIVILEGES.len());
+        assert!(!db_perms[0].has_grant_option);
+        assert_eq!(db_perms[1].database, "shop_db");
+        assert_eq!(db_perms[1].privileges, vec!["SELECT", "INSERT", "UPDATE"]);
+        assert!(db_perms[1].has_grant_option);
     }
 }

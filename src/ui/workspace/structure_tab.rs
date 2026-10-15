@@ -4,8 +4,8 @@ use crate::db::models::{
 };
 use crate::ui::workspace::{
     CELL_EXTRA_PADDING, DEFAULT_DATA_COL_WIDTH, HEADER_EXTRA_PADDING, MIN_COLUMN_WIDTH,
-    build_resizable_header_cell, compute_auto_column_widths, create_spreadsheet_label_cell,
-    measure_single_line_text,
+    build_resizable_header_cell, build_spreadsheet_scrolled_window, clear_spreadsheet_grid,
+    compute_auto_column_widths, create_spreadsheet_label_cell, measure_single_line_text,
 };
 use adw::prelude::*;
 use async_channel::Sender;
@@ -214,13 +214,7 @@ impl StructureTab {
         grid.set_halign(gtk::Align::Start);
         grid.set_valign(gtk::Align::Start);
 
-        let scroll = gtk::ScrolledWindow::builder()
-            .vexpand(true)
-            .hexpand(true)
-            .hscrollbar_policy(gtk::PolicyType::Automatic)
-            .vscrollbar_policy(gtk::PolicyType::Automatic)
-            .child(&grid)
-            .build();
+        let scroll = build_spreadsheet_scrolled_window(&grid);
 
         top_box.append(&scroll);
 
@@ -264,13 +258,7 @@ impl StructureTab {
         idx_grid.set_halign(gtk::Align::Start);
         idx_grid.set_valign(gtk::Align::Start);
 
-        let idx_scroll = gtk::ScrolledWindow::builder()
-            .vexpand(true)
-            .hexpand(true)
-            .hscrollbar_policy(gtk::PolicyType::Automatic)
-            .vscrollbar_policy(gtk::PolicyType::Automatic)
-            .child(&idx_grid)
-            .build();
+        let idx_scroll = build_spreadsheet_scrolled_window(&idx_grid);
 
         bottom_box.append(&idx_scroll);
 
@@ -440,6 +428,10 @@ impl StructureTab {
         if table_changed {
             self.col_widths.borrow_mut().clear();
             self.idx_col_widths.borrow_mut().clear();
+            self.scroll.hadjustment().set_value(0.0);
+            self.scroll.vadjustment().set_value(0.0);
+            self.idx_scroll.hadjustment().set_value(0.0);
+            self.idx_scroll.vadjustment().set_value(0.0);
         }
         *self.current_db.borrow_mut() = database.to_string();
         *self.current_table.borrow_mut() = table.to_string();
@@ -562,6 +554,9 @@ impl StructureTab {
     }
 
     fn render_rows(&self) {
+        let saved_h = self.scroll.hadjustment().value();
+        let saved_v = self.scroll.vadjustment().value();
+
         let table = self.current_table.borrow().clone();
         let cols = self.columns.borrow().clone();
 
@@ -578,9 +573,7 @@ impl StructureTab {
         self.add_btn.set_sensitive(!table.is_empty());
         self.refresh_btn.set_sensitive(!table.is_empty());
 
-        while let Some(child) = self.grid.first_child() {
-            self.grid.remove(&child);
-        }
+        clear_spreadsheet_grid(&self.grid);
         self.header_cells.borrow_mut().clear();
         self.natural_col_widths.borrow_mut().clear();
 
@@ -750,6 +743,7 @@ impl StructureTab {
             edit_btn.add_css_class("cell-action-btn");
             edit_btn.set_valign(gtk::Align::Center);
             edit_btn.set_margin_start(6);
+            edit_btn.set_focus_on_click(false);
             edit_btn.set_tooltip_text(Some("Edit Column"));
 
             let del_btn = gtk::Button::from_icon_name("user-trash-symbolic");
@@ -757,6 +751,7 @@ impl StructureTab {
             del_btn.add_css_class("error");
             del_btn.add_css_class("cell-action-btn");
             del_btn.set_valign(gtk::Align::Center);
+            del_btn.set_focus_on_click(false);
             del_btn.set_tooltip_text(Some("Drop Column"));
 
             actions_cell.append(&edit_btn);
@@ -914,6 +909,8 @@ impl StructureTab {
 
         *self.natural_col_widths.borrow_mut() = natural_widths;
         self.apply_column_widths();
+        self.scroll.hadjustment().set_value(saved_h);
+        self.scroll.vadjustment().set_value(saved_v);
 
         let tab_for_idle = self.clone();
         gtk::glib::idle_add_local_once(move || {
@@ -1496,6 +1493,9 @@ impl StructureTab {
     }
 
     fn render_indexes(&self) {
+        let saved_h = self.idx_scroll.hadjustment().value();
+        let saved_v = self.idx_scroll.vadjustment().value();
+
         let table = self.current_table.borrow().clone();
         let cols = self.columns.borrow().clone();
         let indexes = self.indexes.borrow().clone();
@@ -1512,9 +1512,7 @@ impl StructureTab {
             .set_sensitive(!table.is_empty() && !cols.is_empty());
         self.idx_refresh_btn.set_sensitive(!table.is_empty());
 
-        while let Some(child) = self.idx_grid.first_child() {
-            self.idx_grid.remove(&child);
-        }
+        clear_spreadsheet_grid(&self.idx_grid);
         self.idx_header_cells.borrow_mut().clear();
         self.idx_natural_col_widths.borrow_mut().clear();
 
@@ -1663,6 +1661,7 @@ impl StructureTab {
             edit_btn.add_css_class("cell-action-btn");
             edit_btn.set_valign(gtk::Align::Center);
             edit_btn.set_margin_start(6);
+            edit_btn.set_focus_on_click(false);
             edit_btn.set_tooltip_text(Some("Edit Index"));
 
             let del_btn = gtk::Button::from_icon_name("user-trash-symbolic");
@@ -1670,6 +1669,7 @@ impl StructureTab {
             del_btn.add_css_class("error");
             del_btn.add_css_class("cell-action-btn");
             del_btn.set_valign(gtk::Align::Center);
+            del_btn.set_focus_on_click(false);
             del_btn.set_tooltip_text(Some("Drop Index"));
 
             actions_cell.append(&edit_btn);
@@ -1731,6 +1731,8 @@ impl StructureTab {
 
         *self.idx_natural_col_widths.borrow_mut() = natural_widths;
         self.apply_idx_column_widths();
+        self.idx_scroll.hadjustment().set_value(saved_h);
+        self.idx_scroll.vadjustment().set_value(saved_v);
 
         let tab_for_idle = self.clone();
         gtk::glib::idle_add_local_once(move || {

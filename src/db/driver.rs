@@ -45,6 +45,22 @@ pub trait DatabaseDriver: Send + Sync {
         constraint_name: &str,
     ) -> Result<()>;
     async fn execute_raw_query(&self, db_name: &str, sql: &str) -> Result<RawQueryOutcome>;
+    async fn list_users(&self) -> Result<Vec<DbUser>>;
+    async fn create_user(&self, spec: &CreateUserSpec) -> Result<()>;
+    async fn update_user(&self, spec: &UpdateUserSpec) -> Result<()>;
+    async fn drop_user(&self, username: &str, host: Option<&str>) -> Result<()>;
+    async fn get_database_permissions(
+        &self,
+        username: &str,
+        host: Option<&str>,
+    ) -> Result<Vec<DatabasePermission>>;
+    async fn set_database_permissions(&self, spec: &DbPermissionSpec) -> Result<()>;
+    async fn revoke_database_permissions(
+        &self,
+        username: &str,
+        host: Option<&str>,
+        database: &str,
+    ) -> Result<()>;
 }
 
 /// Quote a MySQL identifier with backticks (`ident`).

@@ -648,6 +648,237 @@ impl PostgresDriver {
             ))
         }
     }
+
+    fn format_role_attributes(global_privileges: &[String], with_grant_option: bool) -> String {
+        let norm: Vec<String> = global_privileges
+            .iter()
+            .map(|s| s.trim().to_ascii_uppercase())
+            .collect();
+        let has = |kw: &str| norm.iter().any(|p| p == kw);
+
+        let login = if has("LOGIN") { "LOGIN" } else { "NOLOGIN" };
+        let superuser = if has("SUPERUSER") {
+            "SUPERUSER"
+        } else {
+            "NOSUPERUSER"
+        };
+        let createdb = if has("CREATEDB") {
+            "CREATEDB"
+        } else {
+            "NOCREATEDB"
+        };
+        let createrole = if has("CREATEROLE") || with_grant_option {
+            "CREATEROLE"
+        } else {
+            "NOCREATEROLE"
+        };
+        let replication = if has("REPLICATION") {
+            "REPLICATION"
+        } else {
+            "NOREPLICATION"
+        };
+        let bypassrls = if has("BYPASSRLS") {
+            "BYPASSRLS"
+        } else {
+            "NOBYPASSRLS"
+        };
+
+        format!(
+            "{} {} {} {} {} {}",
+            login, superuser, createdb, createrole, replication, bypassrls
+        )
+    }
+
+    fn format_create_user_stmt(spec: &CreateUserSpec) -> Result<String> {
+        let user = spec.username.trim();
+        if user.is_empty() {
+            return Err(anyhow!("Username cannot be empty"));
+        }
+        let attrs = Self::format_role_attributes(&spec.global_privileges, spec.with_grant_option);
+        if spec.password.is_empty() {
+            Ok(format!("CREATE ROLE {} WITH {}", quote_pg_ident(user), attrs))
+        } else {
+            Ok(format!(
+                "CREATE ROLE {} WITH {} PASSWORD {}",
+                quote_pg_ident(user),
+                attrs,
+                escape_sql_literal(&DbValue::Text(spec.password.clone()))
+            ))
+        }
+    }
+
+    fn format_update_user_stmts(spec: &UpdateUserSpec) -> Result<Vec<String>> {
+        let old_user = spec.old_username.trim();
+        let new_user = spec.new_username.trim();
+        if old_user.is_empty() || new_user.is_empty() {
+            return Err(anyhow!("Username cannot be empty"));
+        }
+        let mut stmts = Vec::new();
+        if old_user != new_user {
+            stmts.push(format!(
+                "ALTER ROLE {} RENAME TO {}",
+                quote_pg_ident(old_user),
+                quote_pg_ident(new_user)
+            ));
+        }
+        let attrs = Self::format_role_attributes(&spec.global_privileges, spec.with_grant_option);
+        if let Some(pwd) = &spec.new_password {
+            if !pwd.is_empty() {
+                stmts.push(format!(
+                    "ALTER ROLE {} WITH {} PASSWORD {}",
+                    quote_pg_ident(new_user),
+                    attrs,
+                    escape_sql_literal(&DbValue::Text(pwd.clone()))
+                ));
+                return Ok(stmts);
+            }
+        }
+        stmts.push(format!(
+            "ALTER ROLE {} WITH {}",
+            quote_pg_ident(new_user),
+            attrs
+        ));
+        Ok(stmts)
+    }
+
+    fn format_drop_user_stmt(username: &str) -> Result<String> {
+        let user = username.trim();
+        if user.is_empty() {
+            return Err(anyhow!("Username cannot be empty"));
+        }
+        Ok(format!("DROP ROLE {}", quote_pg_ident(user)))
+    }
+
+    fn format_set_db_permissions_stmts(
+        spec: &DbPermissionSpec,
+    ) -> Result<(Vec<String>, Vec<String>)> {
+        let user = spec.username.trim();
+        let db = spec.database.trim();
+        if user.is_empty() {
+            return Err(anyhow!("Username cannot be empty"));
+        }
+        if db.is_empty() {
+            return Err(anyhow!("Database name cannot be empty"));
+        }
+
+        let quoted_user = quote_pg_ident(user);
+        let quoted_db = quote_pg_ident(db);
+        let grant_opt = if spec.with_grant_option {
+            " WITH GRANT OPTION"
+        } else {
+            ""
+        };
+
+        let mut db_obj_privs = Vec::new();
+        let mut table_privs = Vec::new();
+
+        for p in &spec.privileges {
+            let up = p.trim().to_ascii_uppercase();
+            if up.is_empty() {
+                continue;
+            }
+            if up == "ALL PRIVILEGES" || up == "ALL" {
+                db_obj_privs = PG_DB_OBJECT_PRIVILEGES
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect();
+                table_privs = PG_TABLE_PRIVILEGES
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect();
+                break;
+            }
+            if PG_DB_OBJECT_PRIVILEGES.contains(&up.as_str()) {
+                if !db_obj_privs.contains(&up) {
+                    db_obj_privs.push(up);
+                }
+            } else if PG_TABLE_PRIVILEGES.contains(&up.as_str()) {
+                if !table_privs.contains(&up) {
+                    table_privs.push(up);
+                }
+            } else {
+                return Err(anyhow!("Unsupported PostgreSQL database privilege '{}'", p));
+            }
+        }
+
+        let mut db_stmts = vec![format!(
+            "REVOKE ALL PRIVILEGES ON DATABASE {} FROM {}",
+            quoted_db, quoted_user
+        )];
+        if !db_obj_privs.is_empty() {
+            db_stmts.push(format!(
+                "GRANT {} ON DATABASE {} TO {}{}",
+                db_obj_privs.join(", "),
+                quoted_db,
+                quoted_user,
+                grant_opt
+            ));
+        }
+
+        let mut schema_stmts = vec![
+            format!(
+                "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA \"public\" FROM {}",
+                quoted_user
+            ),
+            format!(
+                "REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA \"public\" FROM {}",
+                quoted_user
+            ),
+            format!(
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA \"public\" REVOKE ALL ON TABLES FROM {}",
+                quoted_user
+            ),
+            format!(
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA \"public\" REVOKE ALL ON SEQUENCES FROM {}",
+                quoted_user
+            ),
+        ];
+
+        if !table_privs.is_empty() {
+            schema_stmts.push(format!(
+                "GRANT USAGE ON SCHEMA \"public\" TO {}{}",
+                quoted_user, grant_opt
+            ));
+            let tbl_clause = table_privs.join(", ");
+            schema_stmts.push(format!(
+                "GRANT {} ON ALL TABLES IN SCHEMA \"public\" TO {}{}",
+                tbl_clause, quoted_user, grant_opt
+            ));
+            schema_stmts.push(format!(
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA \"public\" GRANT {} ON TABLES TO {}{}",
+                tbl_clause, quoted_user, grant_opt
+            ));
+            if table_privs
+                .iter()
+                .any(|p| matches!(p.as_str(), "SELECT" | "INSERT" | "UPDATE"))
+            {
+                schema_stmts.push(format!(
+                    "GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA \"public\" TO {}{}",
+                    quoted_user, grant_opt
+                ));
+                schema_stmts.push(format!(
+                    "ALTER DEFAULT PRIVILEGES IN SCHEMA \"public\" GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO {}{}",
+                    quoted_user, grant_opt
+                ));
+            }
+        }
+
+        Ok((db_stmts, schema_stmts))
+    }
+
+    fn format_revoke_db_permissions_stmts(
+        username: &str,
+        database: &str,
+    ) -> Result<(Vec<String>, Vec<String>)> {
+        let empty_spec = DbPermissionSpec {
+            username: username.to_string(),
+            host: None,
+            database: database.to_string(),
+            privileges: Vec::new(),
+            with_grant_option: false,
+        };
+        Self::format_set_db_permissions_stmts(&empty_spec)
+    }
 }
 
 fn decode_pg_cell(row: &PgRow, idx: usize) -> DbValue {
@@ -1354,6 +1585,265 @@ impl DatabaseDriver for PostgresDriver {
             })
         }
     }
+
+    async fn list_users(&self) -> Result<Vec<DbUser>> {
+        let pool = self.pool_for_db("").await?;
+        let sql = "SELECT rolname, rolsuper, rolcreatedb, rolcreaterole, rolcanlogin, rolreplication, rolbypassrls \
+                   FROM pg_catalog.pg_roles \
+                   WHERE rolname NOT LIKE 'pg_%' \
+                   ORDER BY rolname";
+        let rows = sqlx::raw_sql(sql)
+            .fetch_all(&pool)
+            .await
+            .context("Failed to list PostgreSQL roles")?;
+
+        let mut users = Vec::with_capacity(rows.len());
+        for row in rows {
+            let username = decode_pg_cell(&row, 0).display_text().trim().to_string();
+            if username.is_empty() {
+                continue;
+            }
+            let is_true = |idx: usize| {
+                let val = decode_pg_cell(&row, idx).display_text().to_ascii_lowercase();
+                val == "true" || val == "t" || val == "1"
+            };
+            let rolsuper = is_true(1);
+            let rolcreatedb = is_true(2);
+            let rolcreaterole = is_true(3);
+            let rolcanlogin = is_true(4);
+            let rolreplication = is_true(5);
+            let rolbypassrls = is_true(6);
+
+            let mut global_privileges = Vec::new();
+            if rolcanlogin {
+                global_privileges.push("LOGIN".to_string());
+            }
+            if rolsuper {
+                global_privileges.push("SUPERUSER".to_string());
+            }
+            if rolcreatedb {
+                global_privileges.push("CREATEDB".to_string());
+            }
+            if rolcreaterole {
+                global_privileges.push("CREATEROLE".to_string());
+            }
+            if rolreplication {
+                global_privileges.push("REPLICATION".to_string());
+            }
+            if rolbypassrls {
+                global_privileges.push("BYPASSRLS".to_string());
+            }
+
+            users.push(DbUser {
+                username,
+                host: None,
+                global_privileges,
+                has_grant_option: rolcreaterole || rolsuper,
+            });
+        }
+        Ok(users)
+    }
+
+    async fn create_user(&self, spec: &CreateUserSpec) -> Result<()> {
+        let pool = self.pool_for_db("").await?;
+        let sql = Self::format_create_user_stmt(spec)?;
+        sqlx::raw_sql(&sql)
+            .execute(&pool)
+            .await
+            .with_context(|| format!("Failed to create role: {}", sql))?;
+        Ok(())
+    }
+
+    async fn update_user(&self, spec: &UpdateUserSpec) -> Result<()> {
+        let pool = self.pool_for_db("").await?;
+        let stmts = Self::format_update_user_stmts(spec)?;
+        for sql in stmts {
+            sqlx::raw_sql(&sql)
+                .execute(&pool)
+                .await
+                .with_context(|| format!("Failed to update role: {}", sql))?;
+        }
+        Ok(())
+    }
+
+    async fn drop_user(&self, username: &str, _host: Option<&str>) -> Result<()> {
+        let pool = self.pool_for_db("").await?;
+        let sql = Self::format_drop_user_stmt(username)?;
+        sqlx::raw_sql(&sql)
+            .execute(&pool)
+            .await
+            .with_context(|| format!("Failed to drop role: {}", sql))?;
+        Ok(())
+    }
+
+    async fn get_database_permissions(
+        &self,
+        username: &str,
+        _host: Option<&str>,
+    ) -> Result<Vec<DatabasePermission>> {
+        use std::collections::BTreeMap;
+
+        let user = username.trim();
+        if user.is_empty() {
+            return Ok(Vec::new());
+        }
+        let escaped_user = escape_sql_literal(&DbValue::Text(user.to_string()));
+        let pool = self.pool_for_db("").await?;
+
+        let mut db_map: BTreeMap<String, (Vec<String>, bool)> = BTreeMap::new();
+
+        // 1. Database-level explicit grants (CONNECT, CREATE, TEMPORARY)
+        let db_acl_sql = format!(
+            "SELECT d.datname, a.privilege_type, a.is_grantable \
+             FROM pg_catalog.pg_database d \
+             CROSS JOIN LATERAL aclexplode(COALESCE(d.datacl, acldefault('d', d.datdba))) a \
+             JOIN pg_catalog.pg_roles r ON r.oid = a.grantee \
+             WHERE d.datistemplate = false \
+               AND r.rolname = {} \
+             ORDER BY d.datname",
+            escaped_user
+        );
+        if let Ok(rows) = sqlx::raw_sql(&db_acl_sql).fetch_all(&pool).await {
+            for row in rows {
+                let db_name = decode_pg_cell(&row, 0).display_text().trim().to_string();
+                let priv_type = decode_pg_cell(&row, 1)
+                    .display_text()
+                    .trim()
+                    .to_ascii_uppercase();
+                let grantable_str = decode_pg_cell(&row, 2)
+                    .display_text()
+                    .trim()
+                    .to_ascii_lowercase();
+                let is_grantable =
+                    grantable_str == "true" || grantable_str == "t" || grantable_str == "yes";
+
+                if db_name.is_empty() || !PG_DB_PRIVILEGES.contains(&priv_type.as_str()) {
+                    continue;
+                }
+                let entry = db_map
+                    .entry(db_name)
+                    .or_insert_with(|| (Vec::new(), false));
+                if is_grantable {
+                    entry.1 = true;
+                }
+                if !entry.0.contains(&priv_type) {
+                    entry.0.push(priv_type);
+                }
+            }
+        }
+
+        // 2. Public schema table and default table grants per database
+        let databases = self.list_databases().await.unwrap_or_default();
+        let tbl_grants_sql = format!(
+            "SELECT DISTINCT privilege_type, is_grantable \
+             FROM information_schema.role_table_grants \
+             WHERE grantee = {u} AND table_schema = 'public' \
+             UNION \
+             SELECT DISTINCT a.privilege_type, CASE WHEN a.is_grantable THEN 'YES' ELSE 'NO' END \
+             FROM pg_catalog.pg_default_acl d \
+             JOIN pg_catalog.pg_namespace n ON n.oid = d.defaclnamespace \
+             CROSS JOIN LATERAL aclexplode(d.defaclacl) a \
+             JOIN pg_catalog.pg_roles r ON r.oid = a.grantee \
+             WHERE n.nspname = 'public' AND d.defaclobjtype = 'r' AND r.rolname = {u}",
+            u = escaped_user
+        );
+
+        for db_name in databases {
+            if let Ok(db_pool) = self.pool_for_db(&db_name).await {
+                if let Ok(rows) = sqlx::raw_sql(&tbl_grants_sql).fetch_all(&db_pool).await {
+                    for row in rows {
+                        let priv_type = decode_pg_cell(&row, 0)
+                            .display_text()
+                            .trim()
+                            .to_ascii_uppercase();
+                        let grantable_str = decode_pg_cell(&row, 1)
+                            .display_text()
+                            .trim()
+                            .to_ascii_lowercase();
+                        let is_grantable = grantable_str == "yes"
+                            || grantable_str == "true"
+                            || grantable_str == "t";
+
+                        if !PG_DB_PRIVILEGES.contains(&priv_type.as_str()) {
+                            continue;
+                        }
+                        let entry = db_map
+                            .entry(db_name.clone())
+                            .or_insert_with(|| (Vec::new(), false));
+                        if is_grantable {
+                            entry.1 = true;
+                        }
+                        if !entry.0.contains(&priv_type) {
+                            entry.0.push(priv_type);
+                        }
+                    }
+                }
+            }
+        }
+
+        let out = db_map
+            .into_iter()
+            .filter(|(_, (privs, _))| !privs.is_empty())
+            .map(|(database, (mut privileges, has_grant_option))| {
+                privileges.sort_by_key(|p| {
+                    PG_DB_PRIVILEGES
+                        .iter()
+                        .position(|&k| k == p.as_str())
+                        .unwrap_or(usize::MAX)
+                });
+                DatabasePermission {
+                    username: user.to_string(),
+                    host: None,
+                    database,
+                    privileges,
+                    has_grant_option,
+                }
+            })
+            .collect();
+
+        Ok(out)
+    }
+
+    async fn set_database_permissions(&self, spec: &DbPermissionSpec) -> Result<()> {
+        let (db_stmts, schema_stmts) = Self::format_set_db_permissions_stmts(spec)?;
+        let cluster_pool = self.pool_for_db("").await?;
+        for sql in db_stmts {
+            sqlx::raw_sql(&sql)
+                .execute(&cluster_pool)
+                .await
+                .with_context(|| format!("Failed to execute: {}", sql))?;
+        }
+        let target_pool = self.pool_for_db(&spec.database).await?;
+        for sql in schema_stmts {
+            sqlx::raw_sql(&sql)
+                .execute(&target_pool)
+                .await
+                .with_context(|| format!("Failed to execute on '{}': {}", spec.database, sql))?;
+        }
+        Ok(())
+    }
+
+    async fn revoke_database_permissions(
+        &self,
+        username: &str,
+        _host: Option<&str>,
+        database: &str,
+    ) -> Result<()> {
+        let (db_stmts, schema_stmts) = Self::format_revoke_db_permissions_stmts(username, database)?;
+        let cluster_pool = self.pool_for_db("").await?;
+        for sql in db_stmts {
+            sqlx::raw_sql(&sql)
+                .execute(&cluster_pool)
+                .await
+                .with_context(|| format!("Failed to execute: {}", sql))?;
+        }
+        if let Ok(target_pool) = self.pool_for_db(database).await {
+            for sql in schema_stmts {
+                let _ = sqlx::raw_sql(&sql).execute(&target_pool).await;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1473,5 +1963,68 @@ mod tests {
             template: None,
         };
         assert!(PostgresDriver::format_create_database_stmt(&empty).is_err());
+    }
+
+    #[test]
+    fn test_pg_user_and_permission_sql_formatting() {
+        let create_spec = CreateUserSpec {
+            username: "analytics_ro".to_string(),
+            host: None,
+            password: " secret ".to_string(),
+            global_privileges: vec!["LOGIN".to_string(), "CREATEDB".to_string()],
+            with_grant_option: false,
+        };
+        assert_eq!(
+            PostgresDriver::format_create_user_stmt(&create_spec).unwrap(),
+            "CREATE ROLE \"analytics_ro\" WITH LOGIN NOSUPERUSER CREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS PASSWORD ' secret '"
+        );
+
+        let update_spec = UpdateUserSpec {
+            old_username: "analytics_ro".to_string(),
+            old_host: None,
+            new_username: "analytics_admin".to_string(),
+            new_host: None,
+            new_password: None,
+            global_privileges: vec!["LOGIN".to_string(), "SUPERUSER".to_string()],
+            with_grant_option: true,
+        };
+        assert_eq!(
+            PostgresDriver::format_update_user_stmts(&update_spec).unwrap(),
+            vec![
+                "ALTER ROLE \"analytics_ro\" RENAME TO \"analytics_admin\"",
+                "ALTER ROLE \"analytics_admin\" WITH LOGIN SUPERUSER NOCREATEDB CREATEROLE NOREPLICATION NOBYPASSRLS"
+            ]
+        );
+
+        let db_perm = DbPermissionSpec {
+            username: "analytics_ro".to_string(),
+            host: None,
+            database: "warehouse".to_string(),
+            privileges: vec!["CONNECT".to_string(), "SELECT".to_string()],
+            with_grant_option: false,
+        };
+        let (db_stmts, schema_stmts) =
+            PostgresDriver::format_set_db_permissions_stmts(&db_perm).unwrap();
+        assert_eq!(
+            db_stmts,
+            vec![
+                "REVOKE ALL PRIVILEGES ON DATABASE \"warehouse\" FROM \"analytics_ro\"",
+                "GRANT CONNECT ON DATABASE \"warehouse\" TO \"analytics_ro\""
+            ]
+        );
+        assert_eq!(
+            schema_stmts,
+            vec![
+                "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA \"public\" FROM \"analytics_ro\"",
+                "REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA \"public\" FROM \"analytics_ro\"",
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA \"public\" REVOKE ALL ON TABLES FROM \"analytics_ro\"",
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA \"public\" REVOKE ALL ON SEQUENCES FROM \"analytics_ro\"",
+                "GRANT USAGE ON SCHEMA \"public\" TO \"analytics_ro\"",
+                "GRANT SELECT ON ALL TABLES IN SCHEMA \"public\" TO \"analytics_ro\"",
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA \"public\" GRANT SELECT ON TABLES TO \"analytics_ro\"",
+                "GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA \"public\" TO \"analytics_ro\"",
+                "ALTER DEFAULT PRIVILEGES IN SCHEMA \"public\" GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO \"analytics_ro\""
+            ]
+        );
     }
 }

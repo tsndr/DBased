@@ -350,6 +350,330 @@ pub struct CreateDatabaseSpec {
     pub template: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DbUser {
+    pub username: String,
+    pub host: Option<String>,
+    pub global_privileges: Vec<String>,
+    pub has_grant_option: bool,
+}
+
+impl DbUser {
+    pub fn display_identity(&self) -> String {
+        match &self.host {
+            Some(h) if !h.is_empty() => format!("'{}'@'{}'", self.username, h),
+            _ => self.username.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DatabasePermission {
+    pub username: String,
+    pub host: Option<String>,
+    pub database: String,
+    pub privileges: Vec<String>,
+    pub has_grant_option: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateUserSpec {
+    pub username: String,
+    pub host: Option<String>,
+    pub password: String,
+    pub global_privileges: Vec<String>,
+    pub with_grant_option: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateUserSpec {
+    pub old_username: String,
+    pub old_host: Option<String>,
+    pub new_username: String,
+    pub new_host: Option<String>,
+    pub new_password: Option<String>,
+    pub global_privileges: Vec<String>,
+    pub with_grant_option: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DbPermissionSpec {
+    pub username: String,
+    pub host: Option<String>,
+    pub database: String,
+    pub privileges: Vec<String>,
+    pub with_grant_option: bool,
+}
+
+pub const MYSQL_GLOBAL_PRIVILEGES: &[&str] = &[
+    "SELECT",
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "CREATE",
+    "ALTER",
+    "DROP",
+    "INDEX",
+    "REFERENCES",
+    "CREATE VIEW",
+    "SHOW VIEW",
+    "CREATE ROUTINE",
+    "ALTER ROUTINE",
+    "EXECUTE",
+    "TRIGGER",
+    "EVENT",
+    "LOCK TABLES",
+    "CREATE USER",
+    "PROCESS",
+    "RELOAD",
+    "SHOW DATABASES",
+    "SUPER",
+];
+
+pub const MYSQL_DB_PRIVILEGES: &[&str] = &[
+    "SELECT",
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "CREATE",
+    "ALTER",
+    "DROP",
+    "INDEX",
+    "REFERENCES",
+    "CREATE VIEW",
+    "SHOW VIEW",
+    "CREATE ROUTINE",
+    "ALTER ROUTINE",
+    "EXECUTE",
+    "TRIGGER",
+    "EVENT",
+    "LOCK TABLES",
+];
+
+pub const PG_GLOBAL_PRIVILEGES: &[&str] = &[
+    "LOGIN",
+    "SUPERUSER",
+    "CREATEDB",
+    "CREATEROLE",
+    "REPLICATION",
+    "BYPASSRLS",
+];
+
+pub const PG_DB_OBJECT_PRIVILEGES: &[&str] = &["CONNECT", "CREATE", "TEMPORARY"];
+
+pub const PG_TABLE_PRIVILEGES: &[&str] = &[
+    "SELECT",
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "TRUNCATE",
+    "REFERENCES",
+    "TRIGGER",
+];
+
+pub const PG_DB_PRIVILEGES: &[&str] = &[
+    "CONNECT",
+    "CREATE",
+    "TEMPORARY",
+    "SELECT",
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "TRUNCATE",
+    "REFERENCES",
+    "TRIGGER",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PermissionPreset {
+    None,
+    ReadOnly,
+    ReadWrite,
+    FullAdmin,
+    Custom,
+}
+
+impl PermissionPreset {
+    pub const ALL_GLOBAL: &[PermissionPreset] = &[
+        PermissionPreset::None,
+        PermissionPreset::ReadOnly,
+        PermissionPreset::ReadWrite,
+        PermissionPreset::FullAdmin,
+        PermissionPreset::Custom,
+    ];
+
+    pub const ALL_DB: &[PermissionPreset] = &[
+        PermissionPreset::ReadOnly,
+        PermissionPreset::ReadWrite,
+        PermissionPreset::FullAdmin,
+        PermissionPreset::Custom,
+    ];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            PermissionPreset::None => "None",
+            PermissionPreset::ReadOnly => "Read-Only",
+            PermissionPreset::ReadWrite => "Read/Write",
+            PermissionPreset::FullAdmin => "Full Admin",
+            PermissionPreset::Custom => "Custom",
+        }
+    }
+
+    pub fn global_privileges_for_engine(engine: DbEngine) -> &'static [&'static str] {
+        match engine {
+            DbEngine::MySql => MYSQL_GLOBAL_PRIVILEGES,
+            DbEngine::Postgres => PG_GLOBAL_PRIVILEGES,
+        }
+    }
+
+    pub fn db_privileges_for_engine(engine: DbEngine) -> &'static [&'static str] {
+        match engine {
+            DbEngine::MySql => MYSQL_DB_PRIVILEGES,
+            DbEngine::Postgres => PG_DB_PRIVILEGES,
+        }
+    }
+
+    pub fn preset_global_privileges(engine: DbEngine, preset: PermissionPreset) -> Vec<String> {
+        let list: &[&str] = match (engine, preset) {
+            (DbEngine::MySql, PermissionPreset::None) => &[],
+            (DbEngine::MySql, PermissionPreset::ReadOnly) => &["SELECT", "SHOW VIEW", "PROCESS"],
+            (DbEngine::MySql, PermissionPreset::ReadWrite) => &[
+                "SELECT",
+                "INSERT",
+                "UPDATE",
+                "DELETE",
+                "CREATE",
+                "ALTER",
+                "INDEX",
+                "CREATE VIEW",
+                "SHOW VIEW",
+                "EXECUTE",
+            ],
+            (DbEngine::MySql, PermissionPreset::FullAdmin) => MYSQL_GLOBAL_PRIVILEGES,
+            (DbEngine::MySql, PermissionPreset::Custom) => &[],
+            (DbEngine::Postgres, PermissionPreset::None) => &["LOGIN"],
+            (DbEngine::Postgres, PermissionPreset::ReadOnly) => &["LOGIN"],
+            (DbEngine::Postgres, PermissionPreset::ReadWrite) => &["LOGIN", "CREATEDB"],
+            (DbEngine::Postgres, PermissionPreset::FullAdmin) => PG_GLOBAL_PRIVILEGES,
+            (DbEngine::Postgres, PermissionPreset::Custom) => &[],
+        };
+        list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    pub fn preset_db_privileges(engine: DbEngine, preset: PermissionPreset) -> Vec<String> {
+        let list: &[&str] = match (engine, preset) {
+            (DbEngine::MySql, PermissionPreset::None) => &[],
+            (DbEngine::MySql, PermissionPreset::ReadOnly) => &["SELECT", "SHOW VIEW"],
+            (DbEngine::MySql, PermissionPreset::ReadWrite) => &[
+                "SELECT",
+                "INSERT",
+                "UPDATE",
+                "DELETE",
+                "CREATE",
+                "ALTER",
+                "INDEX",
+                "REFERENCES",
+                "CREATE VIEW",
+                "SHOW VIEW",
+                "EXECUTE",
+                "TRIGGER",
+                "LOCK TABLES",
+            ],
+            (DbEngine::MySql, PermissionPreset::FullAdmin) => MYSQL_DB_PRIVILEGES,
+            (DbEngine::MySql, PermissionPreset::Custom) => &[],
+            (DbEngine::Postgres, PermissionPreset::None) => &[],
+            (DbEngine::Postgres, PermissionPreset::ReadOnly) => &["CONNECT", "SELECT"],
+            (DbEngine::Postgres, PermissionPreset::ReadWrite) => &[
+                "CONNECT",
+                "TEMPORARY",
+                "SELECT",
+                "INSERT",
+                "UPDATE",
+                "DELETE",
+                "TRUNCATE",
+                "REFERENCES",
+                "TRIGGER",
+            ],
+            (DbEngine::Postgres, PermissionPreset::FullAdmin) => PG_DB_PRIVILEGES,
+            (DbEngine::Postgres, PermissionPreset::Custom) => &[],
+        };
+        list.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    pub fn infer_global_preset(engine: DbEngine, active_privs: &[String]) -> PermissionPreset {
+        let norm_active = normalize_priv_set(active_privs);
+        if norm_active.is_empty() {
+            return PermissionPreset::None;
+        }
+        if norm_active.iter().any(|p| p == "ALL PRIVILEGES" || p == "ALL") {
+            return PermissionPreset::FullAdmin;
+        }
+        if engine == DbEngine::Postgres && norm_active.iter().any(|p| p == "SUPERUSER") {
+            let full = normalize_priv_set(&Self::preset_global_privileges(
+                engine,
+                PermissionPreset::FullAdmin,
+            ));
+            if norm_active == full
+                || norm_active
+                    == normalize_priv_set(&[
+                        "LOGIN".to_string(),
+                        "SUPERUSER".to_string(),
+                        "CREATEDB".to_string(),
+                        "CREATEROLE".to_string(),
+                    ])
+                || norm_active == normalize_priv_set(&["LOGIN".to_string(), "SUPERUSER".to_string()])
+            {
+                return PermissionPreset::FullAdmin;
+            }
+        }
+        for preset in [
+            PermissionPreset::FullAdmin,
+            PermissionPreset::ReadWrite,
+            PermissionPreset::ReadOnly,
+            PermissionPreset::None,
+        ] {
+            let expected =
+                normalize_priv_set(&Self::preset_global_privileges(engine, preset));
+            if norm_active == expected {
+                return preset;
+            }
+        }
+        PermissionPreset::Custom
+    }
+
+    pub fn infer_db_preset(engine: DbEngine, active_privs: &[String]) -> PermissionPreset {
+        let norm_active = normalize_priv_set(active_privs);
+        if norm_active.is_empty() {
+            return PermissionPreset::None;
+        }
+        if norm_active.iter().any(|p| p == "ALL PRIVILEGES" || p == "ALL") {
+            return PermissionPreset::FullAdmin;
+        }
+        for preset in [
+            PermissionPreset::FullAdmin,
+            PermissionPreset::ReadWrite,
+            PermissionPreset::ReadOnly,
+        ] {
+            let expected = normalize_priv_set(&Self::preset_db_privileges(engine, preset));
+            if norm_active == expected {
+                return preset;
+            }
+        }
+        PermissionPreset::Custom
+    }
+}
+
+fn normalize_priv_set(privs: &[String]) -> Vec<String> {
+    let mut v: Vec<String> = privs
+        .iter()
+        .map(|s| s.trim().to_ascii_uppercase())
+        .filter(|s| !s.is_empty() && s != "USAGE")
+        .collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
 /// Commands sent from the GTK4 UI thread to the background Tokio database worker.
 #[derive(Debug, Clone)]
 pub enum BackendCommand {
@@ -420,6 +744,25 @@ pub enum BackendCommand {
         database: String,
         sql: String,
     },
+    RefreshUsers {
+        selected_user: Option<(String, Option<String>)>,
+    },
+    SelectUserForPermissions {
+        username: String,
+        host: Option<String>,
+    },
+    CreateUser(CreateUserSpec),
+    UpdateUser(UpdateUserSpec),
+    DropUser {
+        username: String,
+        host: Option<String>,
+    },
+    SetDatabasePermissions(DbPermissionSpec),
+    RevokeDatabasePermissions {
+        username: String,
+        host: Option<String>,
+        database: String,
+    },
 }
 
 /// Events sent from the background Tokio database worker back to the GTK4 UI thread.
@@ -482,6 +825,56 @@ pub enum BackendEvent {
         columns: Vec<String>,
     },
     RawQueryFinished(Result<RawQueryOutcome, String>),
+    UsersLoaded {
+        users: Vec<DbUser>,
+        selected_user: Option<(String, Option<String>)>,
+        db_permissions: Vec<DatabasePermission>,
+        toast: Option<String>,
+    },
+    UserDbPermissionsLoaded {
+        username: String,
+        host: Option<String>,
+        db_permissions: Vec<DatabasePermission>,
+        toast: Option<String>,
+    },
     Error(String),
     InfoToast(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_permission_preset_roundtrip_and_inference() {
+        for engine in [DbEngine::MySql, DbEngine::Postgres] {
+            for preset in [
+                PermissionPreset::ReadOnly,
+                PermissionPreset::ReadWrite,
+                PermissionPreset::FullAdmin,
+            ] {
+                let db_privs = PermissionPreset::preset_db_privileges(engine, preset);
+                assert_eq!(PermissionPreset::infer_db_preset(engine, &db_privs), preset);
+            }
+        }
+
+        let mysql_rw_global =
+            PermissionPreset::preset_global_privileges(DbEngine::MySql, PermissionPreset::ReadWrite);
+        assert_eq!(
+            PermissionPreset::infer_global_preset(DbEngine::MySql, &mysql_rw_global),
+            PermissionPreset::ReadWrite
+        );
+
+        let pg_admin_global = vec!["LOGIN".to_string(), "SUPERUSER".to_string()];
+        assert_eq!(
+            PermissionPreset::infer_global_preset(DbEngine::Postgres, &pg_admin_global),
+            PermissionPreset::FullAdmin
+        );
+
+        let custom_privs = vec!["SELECT".to_string(), "DELETE".to_string()];
+        assert_eq!(
+            PermissionPreset::infer_db_preset(DbEngine::MySql, &custom_privs),
+            PermissionPreset::Custom
+        );
+    }
 }
