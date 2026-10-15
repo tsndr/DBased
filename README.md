@@ -15,29 +15,35 @@
 
 ---
 
-**DBased** is a lightweight, native Linux GUI database client built with **Rust**, **GTK4**, **Libadwaita**, and **GtkSourceView 5**. Designed around a clean GNOME aesthetic and keyboard-centric workflows, it combines a responsive spreadsheet data grid, schema and foreign-key management, built-in SSH bastion tunneling, and Vim-enabled editors for both SQL queries and multiline `JSON`/`JSONB`/text cells.
+**DBased** is a lightweight, native Linux GUI database client built with **Rust**, **GTK4**, **Libadwaita**, and **GtkSourceView 5**. Designed around a clean GNOME aesthetic and keyboard-centric workflows, it combines a responsive spreadsheet data grid, schema, index, foreign-key, and user/permission management, built-in SSH bastion tunneling, and Vim-enabled editors for both SQL queries and multiline `JSON`/`JSONB`/text cells.
 
 ## Features
 
 - **PostgreSQL & MySQL / MariaDB Support** — Fully asynchronous native drivers powered by `sqlx` and `tokio` so the UI never blocks during heavy queries.
 - **Built-in SSH Tunneling** — Connect through SSH bastion/jump hosts directly inside the app using either **Password** or **Private Key** (with optional key passphrase) authentication via `russh`.
-- **Connection Bookmarks & Quick Connect** — Save connection profiles with OS keyring integration (`oo7` / Secret Service / GNOME Keyring / KWallet) or paste a `postgres://` / `mysql://` connection URL to connect immediately.
+- **Connection Bookmarks & Quick Connect** — Save connection profiles with OS keyring integration (`oo7` / Secret Service / GNOME Keyring / KWallet), import/export bookmarks as JSON, or paste a `postgres://` / `mysql://` connection URL to connect immediately.
+- **Database Creation, Import & Export** — Create new databases (`UTF8` / `utf8mb4` collation), execute `.sql` dumps directly from disk, or export full databases and individual tables to **SQL (`CREATE` + `INSERT`)**, **CSV**, or **JSON**.
 - **Interactive Content Grid**
   - Auto-fitted and mouse-draggable resizable columns.
   - Click column headers to sort (`ASC` / `DESC`).
   - Instant row filtering via full-row search terms or custom SQL `WHERE ...` expressions.
-  - Inline cell editing with visual dirty-state tracking and transactional batch commits (`Ctrl+S`).
+  - Inline cell editing with native **`ENUM` dropdown selectors**, visual dirty-state tracking, and transactional batch commits (`Ctrl+S`).
   - Insert new rows (`Add Row`) and batch-delete selected rows via checkboxes.
   - **Foreign Key Quick-Jump (`>`)** — Jump directly to referenced parent rows with full Back/Forward navigation history (`Alt+Left` / `Alt+Right` or mouse Back/Forward buttons).
   - **Vim-Enabled Multiline Inspector** — Inspect and edit `JSON`, `JSONB`, `XML`, and `TEXT` columns in a side-by-side `GtkSourceView 5` panel with syntax highlighting and Vim modal keybindings (`:w` to stage, `:q` to close, `:wq` to stage & close).
-  - Export current table pages or query results to **CSV** or **JSON**.
-- **Table Structure Management**
-  - Inspect column types, nullability, primary keys (`PRI`), defaults, and extra attributes.
-  - Add, edit, and drop columns with a guided dialog.
+  - Export current table pages or query results to **SQL**, **CSV**, or **JSON**.
+- **Table Structure & Index Management**
+  - Inspect column types, nullability, primary keys (`PRI`), defaults, and extra attributes (`ENUM` values, identity/auto-increment).
+  - Add, edit, and drop columns with a guided dialog (including custom `ENUM` value lists).
+  - **Indexes Panel** — Inspect, create, and drop single- or multi-column indexes (`INDEX`, `UNIQUE`, `FULLTEXT`, `SPATIAL`) with engine-specific index methods (`BTREE`, `HASH`, `GIN`, `GIST`, `BRIN`).
   - **Drag-and-drop column reordering** — Reorder table columns directly by dragging rows (`ALTER TABLE ... MODIFY ... AFTER` on MySQL/MariaDB; transactional table rebuild with foreign-key, index, sequence, and view preservation on PostgreSQL).
 - **Foreign Key Relations Editor**
   - Inspect foreign key constraints, local columns, target tables/columns, and `ON UPDATE` / `ON DELETE` rules (`NO ACTION`, `RESTRICT`, `CASCADE`, `SET NULL`).
   - Click target table links to jump directly to the referenced table, or add/drop foreign key constraints from the UI.
+- **Users & Per-Database Permissions**
+  - Manage PostgreSQL roles and MySQL/MariaDB user accounts (`user@host`) from a dedicated **Users** workspace view.
+  - Create and delete users, rotate passwords, and toggle `Superuser` and `Can Login` attributes.
+  - Grant, modify, and revoke per-database access levels (`READ (SELECT)`, `READ + WRITE`, or `ALL PRIVILEGES`) with one click.
 - **Vim-Powered SQL Query Editor**
   - Syntax-highlighted SQL editor (`GtkSourceView 5`) with full **Vim modal editing** (`NORMAL`, `INSERT`, `VISUAL`, and command-line modes).
   - Execute the full buffer or only the active visual selection (`Ctrl+Enter` or `:r` / `:run`).
@@ -48,17 +54,17 @@
 ## Screenshots
 
 ### Connection Setup & SSH Tunneling
-Manage saved connection bookmarks, test connectivity, paste `postgres://` or `mysql://` URLs via the header popover, or configure encrypted SSH port forwarding.
+Manage saved connection bookmarks, import/export bookmark profiles, test connectivity, or configure encrypted SSH bastion port forwarding.
 
 ![Connection Setup](assets/connection.png)
 
-### Table Content & Multiline JSONB Vim Editor
-Browse and filter rows, edit cells inline, follow foreign key links (`>`), and edit structured `JSONB` or long-text payloads in the side-by-side Vim editor.
+### Table Content, Inline ENUMs & Multiline JSONB Vim Editor
+Browse and filter rows, edit cells inline (including dropdowns for `ENUM` columns), follow foreign key links (`>`), and edit structured `JSONB` or long-text payloads in the side-by-side Vim editor.
 
 ![Table Content View](assets/content.png)
 
-### Table Structure & Drag-and-Drop Column Reordering
-Inspect column definitions, add or modify columns, and drag rows to reorder columns.
+### Table Structure, Indexes & Drag-and-Drop Column Reordering
+Inspect column definitions, add or modify columns, drag rows to reorder columns, and manage `BTREE` / `GIN` / `UNIQUE` table indexes in the bottom split pane.
 
 ![Table Structure View](assets/structure.png)
 
@@ -71,6 +77,11 @@ View, navigate, create, and drop foreign key constraints and cascading rules.
 Write and run ad-hoc SQL queries with syntax highlighting, Vim motions, execution timing, and one-click CSV/JSON export.
 
 ![SQL Query Editor](assets/query.png)
+
+### Users & Per-Database Permissions
+Inspect database roles and user accounts, toggle `Superuser` and `Can Login` flags, rotate credentials, and manage per-database `READ`, `READ + WRITE`, and `ALL PRIVILEGES` grants.
+
+![Users and Permissions View](assets/users.png)
 
 ---
 

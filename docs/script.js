@@ -1,8 +1,8 @@
 const VIEWS = {
   content: {
     badge: "Content View",
-    title: "Spreadsheet Data Grid & Multiline JSONB Vim Inspector",
-    desc: "Browse and filter rows at native speed, edit cells inline with transactional batch commits, jump across foreign keys (>), and inspect JSON/JSONB/XML/TEXT columns in a side-by-side GtkSourceView 5 Vim panel.",
+    title: "Spreadsheet Data Grid, Inline ENUMs & Multiline JSONB Vim Inspector",
+    desc: "Browse and filter rows at native speed, edit cells inline (including native ENUM dropdown selectors) with transactional batch commits, jump across foreign keys (>), and inspect JSON/JSONB/XML/TEXT columns in a side-by-side GtkSourceView 5 Vim panel.",
     img: "assets/content.png",
     alt: "DBased Table Content View and Multiline JSONB Vim Editor",
     shortcuts: [
@@ -27,14 +27,14 @@ const VIEWS = {
   },
   structure: {
     badge: "Structure View",
-    title: "Schema Inspector & Drag-and-Drop Column Reordering",
-    desc: "Inspect column types, nullability, primary keys (PRI), defaults, and extra attributes. Add, modify, or drop columns via guided dialogs, or drag rows to reorder columns natively on both MySQL/MariaDB and PostgreSQL.",
+    title: "Columns, Indexes & Drag-and-Drop Column Reordering",
+    desc: "Inspect column types, nullability, primary keys (PRI), defaults, and extra attributes alongside a dedicated Indexes panel (BTREE, GIN, UNIQUE). Add, modify, or drop columns and indexes via guided dialogs, or drag rows to reorder columns.",
     img: "assets/structure.png",
-    alt: "DBased Table Structure and Drag-and-Drop Column Reordering",
+    alt: "DBased Table Structure, Indexes, and Drag-and-Drop Column Reordering",
     shortcuts: [
       { keys: ["Drag Row"], label: "Reorder column position" },
+      { keys: ["Add Index"], label: "BTREE / GIN / UNIQUE / HASH" },
       { keys: ["PostgreSQL"], label: "Transactional rebuild (FKs/views preserved)" },
-      { keys: ["MySQL"], label: "ALTER TABLE ... MODIFY ... AFTER" },
     ],
   },
   relations: {
@@ -49,15 +49,27 @@ const VIEWS = {
       { keys: ["CASCADE / RESTRICT"], label: "Referential rules" },
     ],
   },
+  users: {
+    badge: "Users & Perms",
+    title: "Users, Roles & Per-Database Permissions",
+    desc: "Inspect and manage PostgreSQL roles and MySQL/MariaDB accounts. Create or drop users, rotate passwords, toggle Superuser and Can Login attributes, and grant or revoke per-database READ, READ + WRITE, or ALL PRIVILEGES.",
+    img: "assets/users.png",
+    alt: "DBased Users and Per-Database Permissions View",
+    shortcuts: [
+      { keys: ["Grant Access"], label: "READ / READ + WRITE / ALL" },
+      { keys: ["Superuser / Login"], label: "Role attribute switches" },
+      { keys: ["PostgreSQL & MySQL"], label: "Unified ACL management" },
+    ],
+  },
   connection: {
     badge: "Connection Setup",
-    title: "Bookmarks, URL Quick-Paste & Built-in SSH Bastion Tunneling",
-    desc: "Manage saved connection profiles backed by your OS keyring (oo7 / Secret Service), paste postgres:// or mysql:// URLs to connect immediately, or forward traffic through encrypted SSH jump hosts via russh.",
+    title: "Bookmarks, Import/Export & Built-in SSH Bastion Tunneling",
+    desc: "Manage saved connection profiles backed by your OS keyring (oo7 / Secret Service), import or export bookmarks as JSON, or forward traffic through encrypted SSH jump hosts via pure-Rust russh.",
     img: "assets/connection.png",
     alt: "DBased Connection Setup and SSH Bastion Tunneling",
     shortcuts: [
-      { keys: ["postgres://"], label: "Quick URL paste" },
       { keys: ["SSH Key / Pass"], label: "Native russh bastion tunnel" },
+      { keys: ["Import / Export"], label: "JSON bookmark portability" },
       { keys: ["oo7 Keyring"], label: "D-Bus Secret Service" },
     ],
   },
@@ -134,8 +146,8 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
 
-  // Number keys 1-5 switch workspace views
-  const viewOrder = ["content", "query", "structure", "relations", "connection"];
+  // Number keys 1-6 switch workspace views
+  const viewOrder = ["content", "query", "structure", "relations", "users", "connection"];
   document.addEventListener("keydown", (e) => {
     if (
       e.target.tagName === "INPUT" ||

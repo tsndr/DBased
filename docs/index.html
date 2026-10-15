@@ -235,6 +235,23 @@
               role="tab"
               aria-selected="false"
               class="adw-tab-btn"
+              data-view="users"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                <circle cx="9" cy="7" r="4" />
+                <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+                <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+              </svg>
+              <span>Users &amp; Perms</span>
+              <span class="tab-key">5</span>
+            </button>
+
+            <button
+              type="button"
+              role="tab"
+              aria-selected="false"
+              class="adw-tab-btn"
               data-view="connection"
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -242,7 +259,7 @@
                 <path d="M7 11V7a5 5 0 0 1 10 0v4" />
               </svg>
               <span>Connection &amp; SSH</span>
-              <span class="tab-key">5</span>
+              <span class="tab-key">6</span>
             </button>
           </div>
         </div>
@@ -266,7 +283,7 @@
                 <line x1="11" y1="8" x2="11" y2="14"></line>
                 <line x1="8" y1="11" x2="14" y2="11"></line>
               </svg>
-              Click image to enlarge · Press 1–5 to switch tabs
+              Click image to enlarge · Press 1–6 to switch tabs
             </span>
           </div>
 
@@ -275,11 +292,11 @@
               <div class="caption-title-row">
                 <span id="caption-badge" class="caption-badge">Content View</span>
                 <h2 id="caption-title" class="caption-title">
-                  Spreadsheet Data Grid &amp; Multiline JSONB Vim Inspector
+                  Spreadsheet Data Grid, Inline ENUMs &amp; Multiline JSONB Vim Inspector
                 </h2>
               </div>
               <p id="caption-desc" class="caption-desc">
-                Browse and filter rows at native speed, edit cells inline with transactional batch commits, jump across foreign keys (&gt;), and inspect JSON/JSONB/XML/TEXT columns in a side-by-side GtkSourceView 5 Vim panel.
+                Browse and filter rows at native speed, edit cells inline (including native ENUM dropdown selectors) with transactional batch commits, jump across foreign keys (&gt;), and inspect JSON/JSONB/XML/TEXT columns in a side-by-side GtkSourceView 5 Vim panel.
               </p>
             </div>
             <div id="caption-shortcuts" class="caption-shortcuts">
@@ -306,7 +323,7 @@
 
         <div class="bento-grid">
           <!-- Feature 1 -->
-          <article class="feature-card span-2">
+          <article class="feature-card">
             <div class="feature-icon-wrap">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                 <rect x="3" y="3" width="18" height="18" rx="2" />
@@ -314,15 +331,14 @@
                 <path d="M9 21V9" />
               </svg>
             </div>
-            <h3 class="feature-title">Interactive Spreadsheet Grid &amp; Foreign Key Quick-Jumps</h3>
+            <h3 class="feature-title">Spreadsheet Grid, Inline ENUMs &amp; FK Jumps</h3>
             <p class="feature-desc">
-              Auto-fitted and mouse-draggable resizable columns, single-click column sorting (<code>ASC</code> / <code>DESC</code>), inline cell editing with dirty-state highlighting, row insertion, and batch checkbox deletion. Click the <code>&gt;</code> button inside any foreign-key cell to jump directly to the referenced parent row—complete with full browser-style Back/Forward history via <code>Alt+Left</code>, <code>Alt+Right</code>, or mouse side buttons.
+              Auto-fitted resizable columns, single-click sorting, inline cell editing with native <code>ENUM</code> dropdowns, and transactional batch commits (<code>Ctrl+S</code>). Click <code>&gt;</code> in any foreign-key cell to jump to the parent row with full <code>Alt+Left</code> / <code>Alt+Right</code> history.
             </p>
             <div class="feature-tags">
-              <span class="tech-tag">Transactional Ctrl+S Batch Commit</span>
-              <span class="tech-tag">FK Navigation History</span>
-              <span class="tech-tag">CSV &amp; JSON Export</span>
-              <span class="tech-tag">Resizable Columns</span>
+              <span class="tech-tag">Ctrl+S Batch Commit</span>
+              <span class="tech-tag">ENUM Dropdowns</span>
+              <span class="tech-tag">FK Navigation</span>
             </div>
           </article>
 
@@ -353,12 +369,12 @@
             </div>
             <h3 class="feature-title">Built-in SSH Bastion Tunneling</h3>
             <p class="feature-desc">
-              Connect through encrypted SSH jump hosts directly inside DBased without external terminal wrappers. Powered by pure-Rust <code>russh</code> with support for both <strong>Password</strong> and <strong>Private Key</strong> (with optional key passphrase) authentication.
+              Connect through encrypted SSH jump hosts directly inside DBased without external terminal wrappers. Powered by pure-Rust <code>russh</code> with support for both <strong>Password</strong> and <strong>Private Key</strong> authentication plus JSON bookmark import/export.
             </p>
             <div class="feature-tags">
               <span class="tech-tag">russh 0.49</span>
               <span class="tech-tag">Ed25519 / RSA Keys</span>
-              <span class="tech-tag">Port Forwarding</span>
+              <span class="tech-tag">Bookmark Sync</span>
             </div>
           </article>
 
@@ -374,17 +390,37 @@
                 <circle cx="4" cy="18" r="1" />
               </svg>
             </div>
-            <h3 class="feature-title">Drag-and-Drop Column Reordering</h3>
+            <h3 class="feature-title">Schema, Indexes &amp; Column Reordering</h3>
             <p class="feature-desc">
-              Add, modify, or drop columns with guided dialogs, and drag rows to reorder table columns—using native <code>ALTER TABLE ... MODIFY ... AFTER</code> on MySQL/MariaDB and a transactional table rebuild preserving foreign keys, indexes, sequences, and views on PostgreSQL.
+              Add, modify, or drop columns and indexes (<code>BTREE</code>, <code>GIN</code>, <code>UNIQUE</code>, <code>HASH</code>) via guided dialogs, and drag rows to reorder columns—using native <code>ALTER TABLE</code> on MySQL and a transactional rebuild preserving FKs, indexes, and views on PostgreSQL.
             </p>
             <div class="feature-tags">
-              <span class="tech-tag">Schema DDL</span>
-              <span class="tech-tag">PG Transactional Rebuild</span>
+              <span class="tech-tag">Indexes Panel</span>
+              <span class="tech-tag">Drag-and-Drop Columns</span>
             </div>
           </article>
 
           <!-- Feature 5 -->
+          <article class="feature-card">
+            <div class="feature-icon-wrap">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                <circle cx="9" cy="7" r="4" />
+                <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+                <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+              </svg>
+            </div>
+            <h3 class="feature-title">Users &amp; Per-Database Permissions</h3>
+            <p class="feature-desc">
+              Manage PostgreSQL roles and MySQL/MariaDB accounts from a dedicated workspace view. Create or drop users, rotate passwords, toggle <code>Superuser</code> and <code>Can Login</code> attributes, and grant or revoke per-database <code>READ</code>, <code>READ + WRITE</code>, or <code>ALL PRIVILEGES</code>.
+            </p>
+            <div class="feature-tags">
+              <span class="tech-tag">Role &amp; Account CRUD</span>
+              <span class="tech-tag">Per-DB ACL Grants</span>
+            </div>
+          </article>
+
+          <!-- Feature 6 -->
           <article class="feature-card">
             <div class="feature-icon-wrap green">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -393,14 +429,13 @@
                 <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
               </svg>
             </div>
-            <h3 class="feature-title">Async PostgreSQL &amp; MySQL Drivers</h3>
+            <h3 class="feature-title">Database Import, Export &amp; Async Drivers</h3>
             <p class="feature-desc">
-              Powered by <code>sqlx</code> with <code>runtime-tokio-rustls</code> and native support for <code>uuid</code>, <code>chrono</code> timestamps, <code>rust_decimal</code> numeric precision, database views, and instant <code>postgres://</code> or <code>mysql://</code> URL quick-connect.
+              Powered by <code>sqlx</code> with <code>runtime-tokio-rustls</code>. Create new databases with custom encoding/collations, import <code>.sql</code> scripts directly from the sidebar, or export full databases and tables to <strong>SQL</strong>, <strong>CSV</strong>, or <strong>JSON</strong>.
             </p>
             <div class="feature-tags">
-              <span class="tech-tag">sqlx 0.8</span>
-              <span class="tech-tag">tokio async</span>
-              <span class="tech-tag">URL Quick-Paste</span>
+              <span class="tech-tag">SQL / CSV / JSON Export</span>
+              <span class="tech-tag">sqlx 0.8 + tokio</span>
             </div>
           </article>
         </div>
