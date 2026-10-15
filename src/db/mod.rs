@@ -3,6 +3,7 @@ pub mod models;
 pub mod mysql;
 pub mod postgres;
 pub mod ssh;
+pub mod transfer;
 
 use crate::config::bookmarks::{ConnectionProfile, DbEngine};
 use crate::db::driver::DatabaseDriver;
@@ -929,6 +930,97 @@ pub fn spawn_db_worker() -> (Sender<BackendCommand>, Receiver<BackendEvent>) {
                                         .await;
                                 }
                             }
+                        }
+                    }
+                    BackendCommand::FetchDatabaseTablesForTransfer { database } => {
+                        if let Some(ref sess) = session {
+                            match sess.driver.list_tables(&database).await {
+                                Ok(tables) => {
+                                    let _ = evt_tx
+                                        .send(BackendEvent::TransferDatabaseTablesLoaded {
+                                            database,
+                                            tables,
+                                        })
+                                        .await;
+                                }
+                                Err(e) => {
+                                    let _ = evt_tx
+                                        .send(BackendEvent::Error(format!("{:#}", e)))
+                                        .await;
+                                }
+                            }
+                        }
+                    }
+                    BackendCommand::RunExport(spec) => {
+                        if let Some(ref sess) = session {
+                            let res = crate::db::transfer::run_export(&*sess.driver, &spec)
+                                .await
+                                .map_err(|e| format!("{:#}", e));
+                            let _ = evt_tx.send(BackendEvent::ExportFinished(res)).await;
+                        } else {
+                            let _ = evt_tx
+                                .send(BackendEvent::ExportFinished(Err(
+                                    "Not connected to any database".to_string(),
+                                )))
+                                .await;
+                        }
+                    }
+                    BackendCommand::RunImport(spec) => {
+                        if let Some(ref mut sess) = session {
+                            let current_ui_db = spec.current_ui_database.clone();
+                            let preferred_db = spec
+                                .target_database
+                                .clone()
+                                .filter(|s| !s.trim().is_empty())
+                                .or(current_ui_db);
+                            match crate::db::transfer::run_import(&mut *sess.driver, &spec).await {
+                                Ok(summary) => {
+                                    let databases =
+                                        sess.driver.list_databases().await.unwrap_or_default();
+                                    let selected_database = match preferred_db.as_deref() {
+                                        Some(cur)
+                                            if !cur.is_empty()
+                                                && databases.iter().any(|d| d == cur) =>
+                                        {
+                                            Some(cur.to_string())
+                                        }
+                                        _ => databases.first().cloned(),
+                                    };
+                                    let mut tables = Vec::new();
+                                    if let Some(ref db) = selected_database {
+                                        let _ = sess.driver.use_database(db).await;
+                                        if let Ok(t) = sess.driver.list_tables(db).await {
+                                            sess.cached_tables =
+                                                t.iter().map(|ti| ti.name.clone()).collect();
+                                            tables = t;
+                                        }
+                                    } else {
+                                        sess.cached_tables.clear();
+                                    }
+                                    let _ = evt_tx
+                                        .send(BackendEvent::ImportFinished(Ok(ImportOutcome {
+                                            summary,
+                                            databases,
+                                            selected_database,
+                                            tables,
+                                        })))
+                                        .await;
+                                }
+                                Err(e) => {
+                                    let _ = evt_tx
+                                        .send(BackendEvent::ImportFinished(Err(format!(
+                                            "{:#}",
+                                            e
+                                        ))))
+                                        .await;
+                                }
+                            }
+                        } else {
+                            let _ = evt_tx
+                                .send(BackendEvent::ImportFinished(Err(
+                                    "Not connected to any database".to_string(),
+                                )))
+                                .await;
                         }
                     }
                 }

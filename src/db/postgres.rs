@@ -1,5 +1,7 @@
+use crate::config::bookmarks::DbEngine;
 use crate::db::driver::{
-    DatabaseDriver, escape_sql_literal, is_row_returning_query, quote_pg_ident,
+    DatabaseDriver, escape_sql_literal, escape_sql_literal_for_engine, is_row_returning_query,
+    quote_pg_ident, truncate_sql_preview,
 };
 use crate::db::models::*;
 use anyhow::{Context, Result, anyhow};
@@ -930,6 +932,143 @@ impl PostgresDriver {
         };
         Self::format_set_db_permissions_stmts(&empty_spec)
     }
+
+    pub(crate) fn build_table_ddl_parts(
+        table: &str,
+        columns: &[ColumnInfo],
+        indexes: &[IndexInfo],
+        relations: &[ForeignKeyInfo],
+        include_drop: bool,
+    ) -> TableDdlParts {
+        let fq_table = Self::qualified_table(table);
+        let mut pre_create_statements = Vec::new();
+        let mut col_defs = Vec::with_capacity(columns.len());
+
+        for col in columns {
+            let enum_vals_opt =
+                parse_enum_data_type(&col.extra).or_else(|| parse_enum_data_type(&col.data_type));
+            let col_type = if let Some(ref vals) = enum_vals_opt {
+                let type_name = if parse_enum_data_type(&col.data_type).is_some() {
+                    Self::pg_enum_type_name(table, &col.name)
+                } else {
+                    col.data_type.trim().to_string()
+                };
+                if let Some(vals_sql) = format_sql_value_list(vals) {
+                    let quoted_type = quote_pg_ident(&type_name);
+                    pre_create_statements.push(format!(
+                        "DO $$ BEGIN\n    CREATE TYPE {} AS ENUM ({});\nEXCEPTION\n    WHEN duplicate_object THEN NULL;\nEND $$;",
+                        quoted_type, vals_sql
+                    ));
+                }
+                quote_pg_ident(&type_name)
+            } else {
+                col.data_type.trim().to_string()
+            };
+
+            if let Some(def) = &col.default_value {
+                if let Some(rest) = def.trim().strip_prefix("nextval('") {
+                    if let Some(end_quote) = rest.find('\'') {
+                        let raw_seq = &rest[..end_quote];
+                        let seq_short = raw_seq
+                            .rsplit('.')
+                            .next()
+                            .unwrap_or(raw_seq)
+                            .trim_matches('"');
+                        if !seq_short.is_empty() {
+                            pre_create_statements.push(format!(
+                                "CREATE SEQUENCE IF NOT EXISTS \"public\".{};",
+                                quote_pg_ident(seq_short)
+                            ));
+                        }
+                    }
+                }
+            }
+
+            let mut line = format!("  {} {}", quote_pg_ident(&col.name), col_type);
+            let identity_gen = Self::parse_identity_generation(Some(&col.extra));
+            if !col.is_nullable || identity_gen.is_some() {
+                line.push_str(" NOT NULL");
+            }
+            if let Some(def) = &col.default_value {
+                if !def.trim().is_empty() && identity_gen.is_none() {
+                    line.push_str(&format!(" DEFAULT {}", Self::format_default_expr(def)));
+                }
+            }
+            if let Some(gen_kind) = identity_gen {
+                line.push_str(&format!(" GENERATED {} AS IDENTITY", gen_kind));
+            }
+            col_defs.push(line);
+        }
+
+        let pk_cols: Vec<String> = if let Some(pk_idx) = indexes.iter().find(|i| i.is_primary) {
+            pk_idx.columns.iter().map(|c| quote_pg_ident(c)).collect()
+        } else {
+            columns
+                .iter()
+                .filter(|c| c.is_primary_key)
+                .map(|c| quote_pg_ident(&c.name))
+                .collect()
+        };
+
+        if !pk_cols.is_empty() {
+            col_defs.push(format!("  PRIMARY KEY ({})", pk_cols.join(", ")));
+        }
+
+        let mut create_and_indexes_sql = String::new();
+        if include_drop {
+            create_and_indexes_sql.push_str(&format!(
+                "DROP TABLE IF EXISTS {} CASCADE;\n",
+                fq_table
+            ));
+        }
+        create_and_indexes_sql.push_str(&format!(
+            "CREATE TABLE {} (\n{}\n);",
+            fq_table,
+            col_defs.join(",\n")
+        ));
+
+        for idx in indexes {
+            if !idx.is_primary {
+                let spec = IndexSpec {
+                    name: idx.name.clone(),
+                    columns: idx.columns.clone(),
+                    index_type: idx.index_type.clone(),
+                    method: Some(idx.method.clone()),
+                };
+                if let Ok(stmt) = Self::format_create_index_stmt(table, &spec) {
+                    create_and_indexes_sql.push('\n');
+                    create_and_indexes_sql.push_str(&stmt);
+                    create_and_indexes_sql.push(';');
+                }
+            }
+        }
+
+        let mut post_data_constraints = Vec::with_capacity(relations.len());
+        for fk in relations {
+            let fq_ref_table = Self::qualified_table(&fk.referenced_table);
+            let constraint_part = if fk.constraint_name.trim().is_empty() {
+                String::new()
+            } else {
+                format!("CONSTRAINT {} ", quote_pg_ident(fk.constraint_name.trim()))
+            };
+            post_data_constraints.push(format!(
+                "ALTER TABLE {} ADD {}FOREIGN KEY ({}) REFERENCES {} ({}) ON DELETE {} ON UPDATE {};",
+                fq_table,
+                constraint_part,
+                quote_pg_ident(&fk.column_name),
+                fq_ref_table,
+                quote_pg_ident(&fk.referenced_column),
+                fk.delete_rule,
+                fk.update_rule
+            ));
+        }
+
+        TableDdlParts {
+            pre_create_statements,
+            create_and_indexes_sql,
+            post_data_constraints,
+        }
+    }
 }
 
 fn decode_pg_cell(row: &PgRow, idx: usize) -> DbValue {
@@ -982,6 +1121,10 @@ fn decode_pg_cell(row: &PgRow, idx: usize) -> DbValue {
 
 #[async_trait]
 impl DatabaseDriver for PostgresDriver {
+    fn engine(&self) -> DbEngine {
+        DbEngine::Postgres
+    }
+
     async fn list_databases(&self) -> Result<Vec<String>> {
         let query = "SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname";
         let pool = self.pool_for_db("").await?;
@@ -1895,11 +2038,277 @@ impl DatabaseDriver for PostgresDriver {
         }
         Ok(())
     }
+
+    async fn get_create_database_ddl(&self, db_name: &str) -> Result<String> {
+        let quoted = quote_pg_ident(db_name);
+        Ok(format!(
+            "-- DBASED_DATABASE: {}\nCREATE DATABASE {};\n\\connect {}",
+            db_name, quoted, quoted
+        ))
+    }
+
+    async fn get_table_ddl(
+        &self,
+        db_name: &str,
+        table: &str,
+        include_drop: bool,
+    ) -> Result<TableDdlParts> {
+        let pool = self.pool_for_db(db_name).await?;
+        let fq_table = Self::qualified_table(table);
+        let escaped_table = escape_sql_literal(&DbValue::Text(table.to_string()));
+        let view_sql = format!(
+            "SELECT pg_get_viewdef(c.oid, true) \
+             FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = 'public' AND c.relname = {} AND c.relkind = 'v'",
+            escaped_table
+        );
+        if let Ok(rows) = sqlx::raw_sql(&view_sql).fetch_all(&pool).await {
+            if let Some(first) = rows.first() {
+                if let DbValue::Text(view_def) = decode_pg_cell(first, 0) {
+                    let mut create_and_indexes_sql = String::new();
+                    if include_drop {
+                        create_and_indexes_sql.push_str(&format!(
+                            "DROP VIEW IF EXISTS {} CASCADE;\n",
+                            fq_table
+                        ));
+                    }
+                    create_and_indexes_sql.push_str(&format!(
+                        "CREATE OR REPLACE VIEW {} AS\n{};",
+                        fq_table,
+                        view_def.trim().trim_end_matches(';')
+                    ));
+                    return Ok(TableDdlParts {
+                        pre_create_statements: Vec::new(),
+                        create_and_indexes_sql,
+                        post_data_constraints: Vec::new(),
+                    });
+                }
+            }
+        }
+
+        let columns = self.get_table_structure(db_name, table).await?;
+        let indexes = self.get_table_indexes(db_name, table).await?;
+        let relations = self.get_relations(db_name, table).await?;
+        Ok(Self::build_table_ddl_parts(
+            table,
+            &columns,
+            &indexes,
+            &relations,
+            include_drop,
+        ))
+    }
+
+    async fn fetch_table_rows_batch(
+        &self,
+        db_name: &str,
+        table: &str,
+        col_count: usize,
+        offset: u64,
+        limit: u32,
+    ) -> Result<Vec<Vec<DbValue>>> {
+        let pool = self.pool_for_db(db_name).await?;
+        let fq_table = Self::qualified_table(table);
+        let sql = format!("SELECT * FROM {} LIMIT {} OFFSET {}", fq_table, limit, offset);
+        let raw_rows = sqlx::raw_sql(&sql)
+            .fetch_all(&pool)
+            .await
+            .with_context(|| format!("Failed to fetch rows from {}", fq_table))?;
+
+        let mut rows = Vec::with_capacity(raw_rows.len());
+        for raw_row in raw_rows {
+            let n = if col_count > 0 {
+                col_count
+            } else {
+                raw_row.columns().len()
+            };
+            let mut vals = Vec::with_capacity(n);
+            for idx in 0..n {
+                vals.push(decode_pg_cell(&raw_row, idx));
+            }
+            rows.push(vals);
+        }
+        Ok(rows)
+    }
+
+    async fn truncate_table(&self, db_name: &str, table: &str) -> Result<()> {
+        let pool = self.pool_for_db(db_name).await?;
+        let fq_table = Self::qualified_table(table);
+        let sql = format!("TRUNCATE TABLE {} RESTART IDENTITY CASCADE", fq_table);
+        sqlx::raw_sql(&sql)
+            .execute(&pool)
+            .await
+            .with_context(|| format!("Failed to truncate table {}", fq_table))?;
+        Ok(())
+    }
+
+    async fn insert_rows_batch(
+        &self,
+        db_name: &str,
+        table: &str,
+        columns: &[String],
+        rows: &[Vec<DbValue>],
+    ) -> Result<u64> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let pool = self.pool_for_db(db_name).await?;
+        let fq_table = Self::qualified_table(table);
+        let quoted_cols: Vec<String> = columns.iter().map(|c| quote_pg_ident(c)).collect();
+        let mut tuple_list = Vec::with_capacity(rows.len());
+        for row in rows {
+            let vals: Vec<String> = row
+                .iter()
+                .map(|v| escape_sql_literal_for_engine(DbEngine::Postgres, v))
+                .collect();
+            tuple_list.push(format!("({})", vals.join(", ")));
+        }
+        let sql = format!(
+            "INSERT INTO {} ({}) VALUES {}",
+            fq_table,
+            quoted_cols.join(", "),
+            tuple_list.join(", ")
+        );
+        let res = sqlx::raw_sql(&sql).execute(&pool).await.map_err(|e| {
+            anyhow!(
+                "Failed to insert batch into {}: {}\n\nStatement: {}",
+                fq_table,
+                e,
+                truncate_sql_preview(&sql, 240)
+            )
+        })?;
+        Ok(res.rows_affected())
+    }
+
+    async fn execute_sql_statement(&self, db_name: &str, sql: &str) -> Result<()> {
+        let trimmed = sql.trim();
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+        let upper = trimmed.to_ascii_uppercase();
+        if upper.starts_with("CREATE DATABASE ") {
+            let normalized = if upper.starts_with("CREATE DATABASE IF NOT EXISTS ") {
+                format!(
+                    "CREATE DATABASE {}",
+                    trimmed["CREATE DATABASE IF NOT EXISTS ".len()..].trim()
+                )
+            } else {
+                trimmed.to_string()
+            };
+            let pool = self.pool_for_db("").await?;
+            if let Err(e) = sqlx::raw_sql(&normalized).execute(&pool).await {
+                let err_str = format!("{:#}", e).to_ascii_lowercase();
+                if err_str.contains("already exists") || err_str.contains("42p04") {
+                    return Ok(());
+                }
+                return Err(anyhow!(
+                    "Failed to create database: {}\n\nStatement: {}",
+                    e,
+                    truncate_sql_preview(&normalized, 240)
+                ));
+            }
+            return Ok(());
+        }
+        let pool = self.pool_for_db(db_name).await?;
+        sqlx::raw_sql(trimmed).execute(&pool).await.map_err(|e| {
+            anyhow!(
+                "SQL error in database '{}': {}\n\nStatement: {}",
+                if db_name.is_empty() { "(default)" } else { db_name },
+                e,
+                truncate_sql_preview(trimmed, 240)
+            )
+        })?;
+        Ok(())
+    }
+
+    async fn execute_sql_batch(
+        &self,
+        db_name: &str,
+        statements: &[String],
+        _legacy_no_backslash_escapes: bool,
+    ) -> Result<()> {
+        for stmt in statements {
+            self.execute_sql_statement(db_name, stmt).await?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_pg_build_table_ddl_parts() {
+        let cols = vec![
+            ColumnInfo {
+                ordinal: 1,
+                name: "id".to_string(),
+                data_type: "int8".to_string(),
+                is_nullable: false,
+                is_primary_key: true,
+                default_value: None,
+                extra: "BY DEFAULT".to_string(),
+            },
+            ColumnInfo {
+                ordinal: 2,
+                name: "role".to_string(),
+                data_type: "user_role_enum".to_string(),
+                is_nullable: false,
+                is_primary_key: false,
+                default_value: Some("'member'::user_role_enum".to_string()),
+                extra: "enum('admin','member')".to_string(),
+            },
+            ColumnInfo {
+                ordinal: 3,
+                name: "org_id".to_string(),
+                data_type: "int8".to_string(),
+                is_nullable: true,
+                is_primary_key: false,
+                default_value: None,
+                extra: String::new(),
+            },
+        ];
+        let indexes = vec![
+            IndexInfo {
+                name: "users_pkey".to_string(),
+                columns: vec!["id".to_string()],
+                is_unique: true,
+                is_primary: true,
+                index_type: "PRIMARY".to_string(),
+                method: "BTREE".to_string(),
+            },
+            IndexInfo {
+                name: "idx_users_org".to_string(),
+                columns: vec!["org_id".to_string()],
+                is_unique: false,
+                is_primary: false,
+                index_type: "INDEX".to_string(),
+                method: "BTREE".to_string(),
+            },
+        ];
+        let fks = vec![ForeignKeyInfo {
+            constraint_name: "fk_users_org".to_string(),
+            column_name: "org_id".to_string(),
+            referenced_table: "orgs".to_string(),
+            referenced_column: "id".to_string(),
+            update_rule: "CASCADE".to_string(),
+            delete_rule: "SET NULL".to_string(),
+        }];
+
+        let parts = PostgresDriver::build_table_ddl_parts("users", &cols, &indexes, &fks, true);
+        assert_eq!(parts.pre_create_statements.len(), 1);
+        assert!(parts.pre_create_statements[0].contains("CREATE TYPE \"user_role_enum\" AS ENUM ('admin', 'member')"));
+        assert!(parts.create_and_indexes_sql.contains("DROP TABLE IF EXISTS \"public\".\"users\" CASCADE;"));
+        assert!(parts.create_and_indexes_sql.contains("\"id\" int8 NOT NULL GENERATED BY DEFAULT AS IDENTITY"));
+        assert!(parts.create_and_indexes_sql.contains("PRIMARY KEY (\"id\")"));
+        assert!(parts.create_and_indexes_sql.contains("CREATE INDEX \"idx_users_org\" ON \"public\".\"users\" USING btree (\"org_id\");"));
+        assert_eq!(parts.post_data_constraints.len(), 1);
+        assert_eq!(
+            parts.post_data_constraints[0],
+            "ALTER TABLE \"public\".\"users\" ADD CONSTRAINT \"fk_users_org\" FOREIGN KEY (\"org_id\") REFERENCES \"public\".\"orgs\" (\"id\") ON DELETE SET NULL ON UPDATE CASCADE;"
+        );
+    }
 
     #[test]
     fn test_pg_index_sql_formatting() {

@@ -1,5 +1,6 @@
 use crate::config::bookmarks::DbEngine;
 use crate::db::models::{BackendCommand, ContentQuery, CreateDatabaseSpec, TableInfo};
+use crate::ui::transfer_dialog::TransferDialogController;
 use adw::prelude::*;
 use async_channel::Sender;
 use gtk4 as gtk;
@@ -14,6 +15,7 @@ const PG_TEMPLATES: &[&str] = &["Default", "template0", "template1"];
 #[derive(Clone)]
 pub struct WorkspaceSidebar {
     pub page: adw::NavigationPage,
+    pub transfer_controller: TransferDialogController,
     window_title: adw::WindowTitle,
     db_dropdown: gtk::DropDown,
     db_model: gtk::StringList,
@@ -42,6 +44,14 @@ impl WorkspaceSidebar {
         let refresh_btn = gtk::Button::from_icon_name("view-refresh-symbolic");
         refresh_btn.set_tooltip_text(Some("Refresh"));
         header.pack_end(&refresh_btn);
+
+        let export_btn = gtk::Button::from_icon_name("document-save-symbolic");
+        export_btn.set_tooltip_text(Some("Export Databases / Tables"));
+        header.pack_end(&export_btn);
+
+        let import_btn = gtk::Button::from_icon_name("document-open-symbolic");
+        import_btn.set_tooltip_text(Some("Import Databases / Tables"));
+        header.pack_end(&import_btn);
 
         toolbar_view.add_top_bar(&header);
 
@@ -110,6 +120,7 @@ impl WorkspaceSidebar {
         let selected_table = Rc::new(RefCell::new(None::<String>));
         let suppress_db_signal = Rc::new(RefCell::new(false));
         let suppress_table_signal = Rc::new(RefCell::new(false));
+        let transfer_controller = TransferDialogController::new(cmd_tx.clone());
 
         // Disconnect button handler
         {
@@ -152,6 +163,7 @@ impl WorkspaceSidebar {
         // Table search filter handler
         let sidebar = Self {
             page,
+            transfer_controller: transfer_controller.clone(),
             window_title,
             db_dropdown,
             db_model,
@@ -165,6 +177,34 @@ impl WorkspaceSidebar {
             suppress_table_signal: suppress_table_signal.clone(),
             cmd_tx: cmd_tx.clone(),
         };
+
+        // Export button handler
+        {
+            let sidebar_clone = sidebar.clone();
+            export_btn.connect_clicked(move |btn| {
+                let active_db = sidebar_clone.selected_db.borrow().clone();
+                let active_tbl = sidebar_clone.selected_table.borrow().clone();
+                sidebar_clone.transfer_controller.open_export_dialog(
+                    btn.upcast_ref::<gtk::Widget>(),
+                    &active_db,
+                    active_tbl.as_deref(),
+                );
+            });
+        }
+
+        // Import button handler
+        {
+            let sidebar_clone = sidebar.clone();
+            import_btn.connect_clicked(move |btn| {
+                let active_db = sidebar_clone.selected_db.borrow().clone();
+                let active_tbl = sidebar_clone.selected_table.borrow().clone();
+                sidebar_clone.transfer_controller.open_import_dialog(
+                    btn.upcast_ref::<gtk::Widget>(),
+                    &active_db,
+                    active_tbl.as_deref(),
+                );
+            });
+        }
 
         // Create Database button handler
         {
@@ -230,6 +270,7 @@ impl WorkspaceSidebar {
         selected_db: Option<&str>,
         tables: Vec<TableInfo>,
     ) {
+        self.transfer_controller.set_databases(databases);
         let prev_db = self.selected_db.borrow().clone();
 
         *self.suppress_db_signal.borrow_mut() = true;
@@ -258,6 +299,8 @@ impl WorkspaceSidebar {
         *self.suppress_db_signal.borrow_mut() = false;
 
         let new_db = self.selected_db.borrow().clone();
+        self.transfer_controller
+            .cache_database_tables(&new_db, &tables);
         if prev_db == new_db {
             let prev_table = self.selected_table.borrow().clone();
             *self.all_tables.borrow_mut() = tables;
@@ -273,6 +316,9 @@ impl WorkspaceSidebar {
     }
 
     pub fn set_tables(&self, tables: Vec<TableInfo>) {
+        let cur_db = self.selected_db.borrow().clone();
+        self.transfer_controller
+            .cache_database_tables(&cur_db, &tables);
         *self.all_tables.borrow_mut() = tables;
         *self.selected_table.borrow_mut() = None;
         self.rebuild_table_list();

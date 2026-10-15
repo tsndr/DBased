@@ -715,6 +715,134 @@ fn normalize_priv_set(privs: &[String]) -> Vec<String> {
     v
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TransferFormat {
+    Sql,
+    Csv,
+    Json,
+}
+
+impl TransferFormat {
+    pub const ALL: &[TransferFormat] = &[
+        TransferFormat::Sql,
+        TransferFormat::Csv,
+        TransferFormat::Json,
+    ];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            TransferFormat::Sql => "SQL (.sql)",
+            TransferFormat::Csv => "CSV (.csv)",
+            TransferFormat::Json => "JSON (.json)",
+        }
+    }
+
+    pub fn extension(&self) -> &'static str {
+        match self {
+            TransferFormat::Sql => "sql",
+            TransferFormat::Csv => "csv",
+            TransferFormat::Json => "json",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SqlExportMode {
+    StructureAndData,
+    DataOnly,
+    StructureOnly,
+}
+
+impl SqlExportMode {
+    pub const ALL: &[SqlExportMode] = &[
+        SqlExportMode::StructureAndData,
+        SqlExportMode::DataOnly,
+        SqlExportMode::StructureOnly,
+    ];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            SqlExportMode::StructureAndData => "Structure and Data",
+            SqlExportMode::DataOnly => "Data Only",
+            SqlExportMode::StructureOnly => "Structure Only (DDL)",
+        }
+    }
+
+    pub fn includes_structure(&self) -> bool {
+        matches!(
+            self,
+            SqlExportMode::StructureAndData | SqlExportMode::StructureOnly
+        )
+    }
+
+    pub fn includes_data(&self) -> bool {
+        matches!(
+            self,
+            SqlExportMode::StructureAndData | SqlExportMode::DataOnly
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DatabaseTableSelection {
+    pub database: String,
+    pub tables: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TableDdlParts {
+    /// Statements emitted before table creation (e.g. PostgreSQL sequences / enum types)
+    pub pre_create_statements: Vec<String>,
+    /// DROP TABLE IF EXISTS (if requested) + CREATE TABLE + secondary indexes
+    pub create_and_indexes_sql: String,
+    /// Deferred statements emitted after all tables in the database are created (e.g. foreign keys)
+    pub post_data_constraints: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExportDestination {
+    SingleFile(std::path::PathBuf),
+    Directory(std::path::PathBuf),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportSpec {
+    pub format: TransferFormat,
+    pub selections: Vec<DatabaseTableSelection>,
+    pub sql_mode: SqlExportMode,
+    pub include_create_database: bool,
+    pub include_drop_table: bool,
+    pub destination: ExportDestination,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImportSource {
+    Files(Vec<std::path::PathBuf>),
+    Directory(std::path::PathBuf),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportSpec {
+    pub format: TransferFormat,
+    pub source: ImportSource,
+    /// Target database when importing SQL or single-DB CSV/JSON files
+    pub target_database: Option<String>,
+    /// Explicit target table when importing a single CSV or single-table JSON file
+    pub target_table: Option<String>,
+    /// Whether to TRUNCATE target table(s) before importing CSV/JSON rows
+    pub truncate_before_import: bool,
+    /// Active database in the sidebar so workspace refresh preserves selection
+    pub current_ui_database: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportOutcome {
+    pub summary: String,
+    pub databases: Vec<String>,
+    pub selected_database: Option<String>,
+    pub tables: Vec<TableInfo>,
+}
+
 /// Commands sent from the GTK4 UI thread to the background Tokio database worker.
 #[derive(Debug, Clone)]
 pub enum BackendCommand {
@@ -804,6 +932,11 @@ pub enum BackendCommand {
         host: Option<String>,
         database: String,
     },
+    FetchDatabaseTablesForTransfer {
+        database: String,
+    },
+    RunExport(ExportSpec),
+    RunImport(ImportSpec),
 }
 
 /// Events sent from the background Tokio database worker back to the GTK4 UI thread.
@@ -878,6 +1011,12 @@ pub enum BackendEvent {
         db_permissions: Vec<DatabasePermission>,
         toast: Option<String>,
     },
+    TransferDatabaseTablesLoaded {
+        database: String,
+        tables: Vec<TableInfo>,
+    },
+    ExportFinished(Result<String, String>),
+    ImportFinished(Result<ImportOutcome, String>),
     Error(String),
     InfoToast(String),
 }

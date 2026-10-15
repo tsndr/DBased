@@ -1,5 +1,7 @@
+use crate::config::bookmarks::DbEngine;
 use crate::db::driver::{
-    DatabaseDriver, escape_sql_literal, is_row_returning_query, quote_mysql_ident,
+    DatabaseDriver, escape_sql_literal, escape_sql_literal_for_engine, is_row_returning_query,
+    quote_mysql_ident, truncate_sql_preview,
 };
 use crate::db::models::*;
 use anyhow::{Context, Result, anyhow};
@@ -607,6 +609,10 @@ fn decode_mysql_cell(row: &MySqlRow, idx: usize) -> DbValue {
 
 #[async_trait]
 impl DatabaseDriver for MySqlDriver {
+    fn engine(&self) -> DbEngine {
+        DbEngine::MySql
+    }
+
     async fn list_databases(&self) -> Result<Vec<String>> {
         let pool = self.pool_for_db("").await?;
         let rows = match sqlx::raw_sql("SHOW DATABASES").fetch_all(&pool).await {
@@ -1343,6 +1349,227 @@ impl DatabaseDriver for MySqlDriver {
             }
         }
         let _ = sqlx::raw_sql("FLUSH PRIVILEGES").execute(&pool).await;
+        Ok(())
+    }
+
+    async fn get_create_database_ddl(&self, db_name: &str) -> Result<String> {
+        let quoted = quote_mysql_ident(db_name);
+        let pool = self.pool_for_db("").await?;
+        let show_sql = format!("SHOW CREATE DATABASE {}", quoted);
+        if let Ok(rows) = sqlx::raw_sql(&show_sql).fetch_all(&pool).await {
+            if let Some(first) = rows.first() {
+                if let DbValue::Text(create_stmt) = decode_mysql_cell(first, 1) {
+                    let normalized = if let Some(rest) = create_stmt
+                        .trim()
+                        .strip_prefix("CREATE DATABASE ")
+                    {
+                        format!("CREATE DATABASE IF NOT EXISTS {}", rest.trim_end_matches(';'))
+                    } else {
+                        create_stmt.trim().trim_end_matches(';').to_string()
+                    };
+                    return Ok(format!("{};\nUSE {};", normalized, quoted));
+                }
+            }
+        }
+        Ok(format!(
+            "CREATE DATABASE IF NOT EXISTS {};\nUSE {};",
+            quoted, quoted
+        ))
+    }
+
+    async fn get_table_ddl(
+        &self,
+        db_name: &str,
+        table: &str,
+        include_drop: bool,
+    ) -> Result<TableDdlParts> {
+        let pool = self.pool_for_db(db_name).await?;
+        let fq_table = Self::qualified_table(db_name, table);
+        let quoted_table = quote_mysql_ident(table);
+        let show_sql = format!("SHOW CREATE TABLE {}", fq_table);
+        let rows = sqlx::raw_sql(&show_sql)
+            .fetch_all(&pool)
+            .await
+            .with_context(|| format!("Failed to fetch DDL for {}", fq_table))?;
+        let first = rows
+            .first()
+            .ok_or_else(|| anyhow!("SHOW CREATE TABLE returned no rows for {}", fq_table))?;
+        let raw_ddl = decode_mysql_cell(first, 1)
+            .display_text()
+            .trim()
+            .trim_end_matches(';')
+            .to_string();
+        let is_view = raw_ddl.to_ascii_uppercase().contains(" VIEW ");
+        let mut create_and_indexes_sql = String::new();
+        if include_drop {
+            if is_view {
+                create_and_indexes_sql
+                    .push_str(&format!("DROP VIEW IF EXISTS {};\n", quoted_table));
+            } else {
+                create_and_indexes_sql
+                    .push_str(&format!("DROP TABLE IF EXISTS {};\n", quoted_table));
+            }
+        }
+        create_and_indexes_sql.push_str(&raw_ddl);
+        create_and_indexes_sql.push(';');
+
+        Ok(TableDdlParts {
+            pre_create_statements: Vec::new(),
+            create_and_indexes_sql,
+            post_data_constraints: Vec::new(),
+        })
+    }
+
+    async fn fetch_table_rows_batch(
+        &self,
+        db_name: &str,
+        table: &str,
+        col_count: usize,
+        offset: u64,
+        limit: u32,
+    ) -> Result<Vec<Vec<DbValue>>> {
+        let pool = self.pool_for_db(db_name).await?;
+        let fq_table = Self::qualified_table(db_name, table);
+        let sql = format!("SELECT * FROM {} LIMIT {} OFFSET {}", fq_table, limit, offset);
+        let raw_rows = sqlx::raw_sql(&sql)
+            .fetch_all(&pool)
+            .await
+            .with_context(|| format!("Failed to fetch rows from {}", fq_table))?;
+
+        let mut rows = Vec::with_capacity(raw_rows.len());
+        for raw_row in raw_rows {
+            let n = if col_count > 0 {
+                col_count
+            } else {
+                raw_row.columns().len()
+            };
+            let mut vals = Vec::with_capacity(n);
+            for idx in 0..n {
+                vals.push(decode_mysql_cell(&raw_row, idx));
+            }
+            rows.push(vals);
+        }
+        Ok(rows)
+    }
+
+    async fn truncate_table(&self, db_name: &str, table: &str) -> Result<()> {
+        let pool = self.pool_for_db(db_name).await?;
+        let fq_table = Self::qualified_table(db_name, table);
+        let sql = format!(
+            "SET FOREIGN_KEY_CHECKS = 0;\nTRUNCATE TABLE {};\nSET FOREIGN_KEY_CHECKS = 1;",
+            fq_table
+        );
+        sqlx::raw_sql(&sql)
+            .execute(&pool)
+            .await
+            .with_context(|| format!("Failed to truncate table {}", fq_table))?;
+        Ok(())
+    }
+
+    async fn insert_rows_batch(
+        &self,
+        db_name: &str,
+        table: &str,
+        columns: &[String],
+        rows: &[Vec<DbValue>],
+    ) -> Result<u64> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let pool = self.pool_for_db(db_name).await?;
+        let fq_table = Self::qualified_table(db_name, table);
+        let quoted_cols: Vec<String> = columns.iter().map(|c| quote_mysql_ident(c)).collect();
+        let mut tuple_list = Vec::with_capacity(rows.len());
+        for row in rows {
+            let vals: Vec<String> = row
+                .iter()
+                .map(|v| escape_sql_literal_for_engine(DbEngine::MySql, v))
+                .collect();
+            tuple_list.push(format!("({})", vals.join(", ")));
+        }
+        let insert_sql = format!(
+            "INSERT INTO {} ({}) VALUES {}",
+            fq_table,
+            quoted_cols.join(", "),
+            tuple_list.join(", ")
+        );
+        let wrapped_sql = format!(
+            "SET FOREIGN_KEY_CHECKS = 0;\nSET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO';\n{};\nSET FOREIGN_KEY_CHECKS = 1;",
+            insert_sql
+        );
+        sqlx::raw_sql(&wrapped_sql)
+            .execute(&pool)
+            .await
+            .map_err(|e| {
+                anyhow!(
+                    "Failed to insert batch into {}: {}\n\nStatement: {}",
+                    fq_table,
+                    e,
+                    truncate_sql_preview(&insert_sql, 240)
+                )
+            })?;
+        Ok(rows.len() as u64)
+    }
+
+    async fn execute_sql_statement(&self, db_name: &str, sql: &str) -> Result<()> {
+        let trimmed = sql.trim();
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+        let pool = self.pool_for_db(db_name).await?;
+        sqlx::raw_sql(trimmed).execute(&pool).await.map_err(|e| {
+            anyhow!(
+                "SQL error in database '{}': {}\n\nStatement: {}",
+                if db_name.is_empty() { "(default)" } else { db_name },
+                e,
+                truncate_sql_preview(trimmed, 240)
+            )
+        })?;
+        Ok(())
+    }
+
+    async fn execute_sql_batch(
+        &self,
+        db_name: &str,
+        statements: &[String],
+        legacy_no_backslash_escapes: bool,
+    ) -> Result<()> {
+        if statements.is_empty() {
+            return Ok(());
+        }
+        let pool = self.pool_for_db(db_name).await?;
+        let sql_mode_stmt = if legacy_no_backslash_escapes {
+            "SET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO,NO_BACKSLASH_ESCAPES';"
+        } else {
+            "SET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO';"
+        };
+
+        for stmt in statements {
+            let trimmed = stmt.trim().trim_end_matches(';').trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let upper = trimmed.to_ascii_uppercase();
+            if upper.starts_with("SET FOREIGN_KEY_CHECKS") {
+                continue;
+            }
+            let wrapped_sql = format!(
+                "SET FOREIGN_KEY_CHECKS = 0;\n{}\n{};\nSET FOREIGN_KEY_CHECKS = 1;",
+                sql_mode_stmt, trimmed
+            );
+            sqlx::raw_sql(&wrapped_sql)
+                .execute(&pool)
+                .await
+                .map_err(|e| {
+                    anyhow!(
+                        "SQL error in database '{}': {}\n\nStatement: {}",
+                        if db_name.is_empty() { "(default)" } else { db_name },
+                        e,
+                        truncate_sql_preview(trimmed, 240)
+                    )
+                })?;
+        }
+
         Ok(())
     }
 }

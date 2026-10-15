@@ -260,6 +260,57 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                         show_toast(&msg);
                     }
                 }
+                BackendEvent::TransferDatabaseTablesLoaded { database, tables } => {
+                    sidebar
+                        .transfer_controller
+                        .cache_database_tables(&database, &tables);
+                }
+                BackendEvent::ExportFinished(res) => match res {
+                    Ok(summary) => {
+                        show_toast(&summary);
+                    }
+                    Err(err) => {
+                        if let Some(win) = window_weak.upgrade() {
+                            show_error_dialog(
+                                win.upcast_ref::<gtk::Widget>(),
+                                "Export Failed",
+                                &err,
+                            );
+                        }
+                    }
+                },
+                BackendEvent::ImportFinished(res) => match res {
+                    Ok(outcome) => {
+                        let prev_db = sidebar.current_database();
+                        let new_db = outcome.selected_database.as_deref().unwrap_or("");
+                        if prev_db != new_db {
+                            workspace_content.content_tab.clear_navigation_history();
+                        }
+                        workspace_content.query_tab.set_database(new_db);
+                        workspace_content
+                            .users_tab
+                            .set_databases(outcome.databases.clone());
+                        let table_names: Vec<String> =
+                            outcome.tables.iter().map(|t| t.name.clone()).collect();
+                        workspace_content.relations_tab.set_all_tables(table_names);
+                        sidebar.set_databases_and_tables(
+                            &outcome.databases,
+                            outcome.selected_database.as_deref(),
+                            outcome.tables,
+                        );
+                        workspace_content.content_tab.request_fetch();
+                        show_toast(&outcome.summary);
+                    }
+                    Err(err) => {
+                        if let Some(win) = window_weak.upgrade() {
+                            show_error_dialog(
+                                win.upcast_ref::<gtk::Widget>(),
+                                "Import Failed",
+                                &err,
+                            );
+                        }
+                    }
+                },
                 BackendEvent::Error(err) => {
                     conn_page.set_busy(false, "");
                     if let Some(win) = window_weak.upgrade() {
