@@ -676,8 +676,12 @@ impl StructureTab {
                 sample_lbl = Some(name_lbl);
             }
 
-            let (type_cell, _) =
-                create_spreadsheet_label_cell(&col.data_type, &[], Some(&col.data_type));
+            let display_data_type = Self::format_display_data_type(&col.data_type);
+            let (type_cell, _) = create_spreadsheet_label_cell(
+                &display_data_type,
+                &[],
+                Some(&display_data_type),
+            );
 
             let null_text = if col.is_nullable { "YES" } else { "NO" };
             let null_classes: &[&str] = if col.is_nullable {
@@ -722,7 +726,7 @@ impl StructureTab {
 
             let row_texts = [
                 col.name.as_str(),
-                col.data_type.as_str(),
+                display_data_type.as_str(),
                 null_text,
                 key_text,
                 def_text,
@@ -1033,8 +1037,77 @@ impl StructureTab {
         }
     }
 
-    fn parse_column_data_type(raw: &str) -> (&str, Option<String>) {
+    fn strip_unsigned_suffix(raw: &str) -> (&str, bool) {
         let trimmed = raw.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        if let Some(rest) = lower.strip_prefix("unsigned") {
+            if rest.starts_with(char::is_whitespace) {
+                let after = trimmed["unsigned".len()..].trim_start();
+                if !after.is_empty() {
+                    return (after, true);
+                }
+            }
+        }
+        if let Some(idx) = lower.rfind("unsigned") {
+            let before = trimmed[..idx].trim_end();
+            let after = trimmed[idx + "unsigned".len()..].trim();
+            if !before.is_empty()
+                && trimmed[..idx].ends_with(char::is_whitespace)
+                && (after.is_empty() || after.eq_ignore_ascii_case("zerofill"))
+            {
+                return (before, true);
+            }
+        }
+        (trimmed, false)
+    }
+
+    pub fn format_display_data_type(raw: &str) -> String {
+        let (base, is_unsigned) = Self::strip_unsigned_suffix(raw);
+        if is_unsigned {
+            format!("unsigned {}", base)
+        } else {
+            base.to_string()
+        }
+    }
+
+    fn type_supports_unsigned_name(selected_type: &str) -> bool {
+        let (base, _) = Self::strip_unsigned_suffix(selected_type);
+        let base_name = base
+            .split_once('(')
+            .map(|(p, _)| p.trim())
+            .unwrap_or(base.trim());
+        matches!(
+            base_name.to_ascii_uppercase().as_str(),
+            "INT"
+                | "INTEGER"
+                | "INT4"
+                | "BIGINT"
+                | "INT8"
+                | "MEDIUMINT"
+                | "INT3"
+                | "SMALLINT"
+                | "INT2"
+                | "TINYINT"
+                | "INT1"
+                | "DECIMAL"
+                | "DEC"
+                | "FIXED"
+                | "NUMERIC"
+                | "FLOAT"
+                | "FLOAT4"
+                | "DOUBLE"
+                | "DOUBLE PRECISION"
+                | "FLOAT8"
+                | "REAL"
+        )
+    }
+
+    pub fn type_supports_unsigned(engine: DbEngine, selected_type: &str) -> bool {
+        engine == DbEngine::MySql && Self::type_supports_unsigned_name(selected_type)
+    }
+
+    fn parse_column_data_type(raw: &str) -> (&str, Option<String>, bool) {
+        let (trimmed, is_unsigned) = Self::strip_unsigned_suffix(raw);
         if let Some((prefix_raw, rest)) = trimmed.split_once('(') {
             let prefix = prefix_raw.trim().to_ascii_lowercase();
             let (inner_raw, suffix_raw) = rest.rsplit_once(')').unwrap_or((rest, ""));
@@ -1042,87 +1115,124 @@ impl StructureTab {
             let suffix = suffix_raw.trim().to_ascii_lowercase();
             match prefix.as_str() {
                 "varchar" | "character varying" | "nvarchar" => {
-                    return ("VARCHAR", Some(inner.to_string()));
+                    return ("VARCHAR", Some(inner.to_string()), false);
                 }
                 "char" | "character" | "bpchar" | "nchar" => {
-                    return ("CHAR", Some(inner.to_string()));
+                    return ("CHAR", Some(inner.to_string()), false);
                 }
                 "varbinary" => {
-                    return ("VARBINARY", Some(inner.to_string()));
+                    return ("VARBINARY", Some(inner.to_string()), false);
                 }
                 "binary" => {
-                    return ("BINARY", Some(inner.to_string()));
+                    return ("BINARY", Some(inner.to_string()), false);
                 }
                 "bit" => {
-                    return ("BIT", Some(inner.to_string()));
+                    return ("BIT", Some(inner.to_string()), false);
                 }
                 "varbit" | "bit varying" => {
-                    return ("VARBIT", Some(inner.to_string()));
+                    return ("VARBIT", Some(inner.to_string()), false);
+                }
+                "int" | "integer" | "int4" => {
+                    return ("INT", None, is_unsigned);
+                }
+                "bigint" | "int8" => {
+                    return ("BIGINT", None, is_unsigned);
+                }
+                "smallint" | "int2" => {
+                    return ("SMALLINT", None, is_unsigned);
+                }
+                "tinyint" | "int1" => {
+                    if inner == "1" && !is_unsigned {
+                        return ("BOOLEAN", None, false);
+                    }
+                    return ("TINYINT", None, is_unsigned);
                 }
                 "decimal" | "dec" => {
-                    return ("DECIMAL", Some(inner.to_string()));
+                    return ("DECIMAL", Some(inner.to_string()), is_unsigned);
                 }
                 "numeric" => {
-                    return ("NUMERIC", Some(inner.to_string()));
+                    return ("NUMERIC", Some(inner.to_string()), is_unsigned);
                 }
                 "float" => {
-                    return ("FLOAT", Some(inner.to_string()));
+                    return ("FLOAT", Some(inner.to_string()), is_unsigned);
+                }
+                "double" | "float8" => {
+                    return ("DOUBLE", None, is_unsigned);
+                }
+                "real" | "float4" => {
+                    return ("REAL", None, is_unsigned);
                 }
                 "time" => {
-                    return ("TIME", Some(inner.to_string()));
+                    return ("TIME", Some(inner.to_string()), false);
                 }
                 "datetime" => {
-                    return ("DATETIME", Some(inner.to_string()));
+                    return ("DATETIME", Some(inner.to_string()), false);
                 }
                 "timestamp" => {
                     if suffix == "with time zone" {
-                        return ("TIMESTAMPTZ", Some(inner.to_string()));
+                        return ("TIMESTAMPTZ", Some(inner.to_string()), false);
                     }
-                    return ("TIMESTAMP", Some(inner.to_string()));
+                    return ("TIMESTAMP", Some(inner.to_string()), false);
                 }
                 "timestamptz" => {
-                    return ("TIMESTAMPTZ", Some(inner.to_string()));
+                    return ("TIMESTAMPTZ", Some(inner.to_string()), false);
                 }
                 "enum" => {
-                    return ("ENUM", Some(inner.to_string()));
+                    return ("ENUM", Some(inner.to_string()), false);
                 }
                 "set" => {
-                    return ("SET", Some(inner.to_string()));
+                    return ("SET", Some(inner.to_string()), false);
                 }
                 _ => {}
             }
         }
         match trimmed.to_ascii_lowercase().as_str() {
-            "varchar" | "character varying" | "nvarchar" => ("VARCHAR", Some("255".to_string())),
-            "char" | "character" | "bpchar" | "nchar" => ("CHAR", Some("36".to_string())),
-            "varbinary" => ("VARBINARY", Some("255".to_string())),
-            "binary" => ("BINARY", Some("16".to_string())),
-            "bit" => ("BIT", Some(String::new())),
-            "varbit" | "bit varying" => ("VARBIT", Some(String::new())),
-            "decimal" | "dec" => ("DECIMAL", Some(String::new())),
-            "numeric" => ("NUMERIC", Some(String::new())),
-            "float" => ("FLOAT", Some(String::new())),
-            "time" | "time without time zone" => ("TIME", Some(String::new())),
-            "datetime" => ("DATETIME", Some(String::new())),
-            "timestamp" | "timestamp without time zone" => ("TIMESTAMP", Some(String::new())),
-            "timestamptz" | "timestamp with time zone" => ("TIMESTAMPTZ", Some(String::new())),
-            "int" | "integer" | "int4" | "int(11)" => ("INT", None),
-            "bigint" | "int8" | "bigint(20)" => ("BIGINT", None),
-            "smallint" | "int2" | "smallint(6)" => ("SMALLINT", None),
-            "tinyint" | "tinyint(4)" => ("TINYINT", None),
-            "bool" | "boolean" | "tinyint(1)" => ("BOOLEAN", None),
-            "float4" | "real" => ("REAL", None),
-            "float8" | "double precision" => ("DOUBLE PRECISION", None),
-            _ => (trimmed, None),
+            "varchar" | "character varying" | "nvarchar" => {
+                ("VARCHAR", Some("255".to_string()), false)
+            }
+            "char" | "character" | "bpchar" | "nchar" => ("CHAR", Some("36".to_string()), false),
+            "varbinary" => ("VARBINARY", Some("255".to_string()), false),
+            "binary" => ("BINARY", Some("16".to_string()), false),
+            "bit" => ("BIT", Some(String::new()), false),
+            "varbit" | "bit varying" => ("VARBIT", Some(String::new()), false),
+            "decimal" | "dec" => ("DECIMAL", Some(String::new()), is_unsigned),
+            "numeric" => ("NUMERIC", Some(String::new()), is_unsigned),
+            "float" => ("FLOAT", Some(String::new()), is_unsigned),
+            "double" => ("DOUBLE", None, is_unsigned),
+            "time" | "time without time zone" => ("TIME", Some(String::new()), false),
+            "datetime" => ("DATETIME", Some(String::new()), false),
+            "timestamp" | "timestamp without time zone" => {
+                ("TIMESTAMP", Some(String::new()), false)
+            }
+            "timestamptz" | "timestamp with time zone" => {
+                ("TIMESTAMPTZ", Some(String::new()), false)
+            }
+            "int" | "integer" | "int4" => ("INT", None, is_unsigned),
+            "bigint" | "int8" => ("BIGINT", None, is_unsigned),
+            "smallint" | "int2" => ("SMALLINT", None, is_unsigned),
+            "tinyint" | "int1" => ("TINYINT", None, is_unsigned),
+            "bool" | "boolean" => ("BOOLEAN", None, false),
+            "float4" | "real" => ("REAL", None, is_unsigned),
+            "float8" | "double precision" => ("DOUBLE PRECISION", None, is_unsigned),
+            _ => (
+                trimmed,
+                None,
+                is_unsigned && Self::type_supports_unsigned_name(trimmed),
+            ),
         }
     }
 
-    fn format_column_data_type(selected_type: &str, raw_param: &str) -> Option<String> {
-        let selected_type = selected_type.trim();
+    fn format_column_data_type(
+        selected_type: &str,
+        raw_param: &str,
+        is_unsigned: bool,
+    ) -> Option<String> {
+        let (base_type, already_unsigned) = Self::strip_unsigned_suffix(selected_type);
+        let selected_type = base_type.trim();
         if selected_type.is_empty() {
             return None;
         }
-        if let Some(spec) = Self::param_spec_for_type(selected_type) {
+        let base_formatted = if let Some(spec) = Self::param_spec_for_type(selected_type) {
             let param = raw_param
                 .trim()
                 .trim_start_matches('(')
@@ -1132,43 +1242,57 @@ impl StructureTab {
                 if spec.required {
                     return None;
                 } else {
-                    return Some(selected_type.to_string());
+                    selected_type.to_string()
                 }
+            } else {
+                format!("{}({})", selected_type, param)
             }
-            Some(format!("{}({})", selected_type, param))
         } else {
-            Some(selected_type.to_string())
+            selected_type.to_string()
+        };
+
+        if (is_unsigned || already_unsigned) && Self::type_supports_unsigned_name(selected_type) {
+            Some(format!("{} UNSIGNED", base_formatted))
+        } else {
+            Some(base_formatted)
         }
     }
 
     fn build_column_type_options(
         engine: DbEngine,
         existing: Option<&ColumnInfo>,
-    ) -> (Vec<String>, usize, Option<String>) {
+    ) -> (Vec<String>, usize, Option<String>, bool) {
         let mut type_options: Vec<String> = Self::column_data_types_for_engine(engine)
             .iter()
             .map(|s| (*s).to_string())
             .collect();
 
-        let (init_type_idx, parsed_param) = if let Some(col) = existing {
+        let (init_type_idx, parsed_param, is_unsigned) = if let Some(col) = existing {
             let raw_dt = col.data_type.trim();
-            let (canonical, param) = Self::parse_column_data_type(raw_dt);
+            let (canonical, param, parsed_unsigned) = Self::parse_column_data_type(raw_dt);
+            let effective_unsigned =
+                parsed_unsigned && Self::type_supports_unsigned(engine, canonical);
             if let Some(pos) = type_options
                 .iter()
                 .position(|t| t.eq_ignore_ascii_case(canonical))
             {
-                (pos, param)
+                (pos, param, effective_unsigned)
             } else if !raw_dt.is_empty() {
-                type_options.insert(0, raw_dt.to_string());
-                (0, None)
+                let custom_label = if effective_unsigned {
+                    canonical.to_string()
+                } else {
+                    raw_dt.to_string()
+                };
+                type_options.insert(0, custom_label);
+                (0, None, effective_unsigned)
             } else {
-                (0, None)
+                (0, None, false)
             }
         } else {
-            (0, None)
+            (0, None, false)
         };
 
-        (type_options, init_type_idx, parsed_param)
+        (type_options, init_type_idx, parsed_param, is_unsigned)
     }
 
     fn normalize_column_extra(engine: DbEngine, raw: &str) -> Option<String> {
@@ -1265,7 +1389,7 @@ impl StructureTab {
             )
             .build();
 
-        let (type_options, init_type_idx, parsed_param) =
+        let (type_options, init_type_idx, parsed_param, init_unsigned) =
             Self::build_column_type_options(engine, existing.as_ref());
 
         let type_refs: Vec<&str> = type_options.iter().map(|s| s.as_str()).collect();
@@ -1293,11 +1417,19 @@ impl StructureTab {
             .visible(init_param_visible)
             .build();
 
+        let init_supports_unsigned = Self::type_supports_unsigned(engine, init_selected_type);
+        let unsigned_row = adw::SwitchRow::builder()
+            .title("Unsigned")
+            .active(init_unsigned && init_supports_unsigned)
+            .visible(init_supports_unsigned)
+            .build();
+
         let last_auto_param = Rc::new(RefCell::new(init_param_text));
         let last_param_kind = Rc::new(RefCell::new(init_spec.map(|s| s.kind)));
         {
             let type_model = type_model.clone();
             let type_param_row = type_param_row.clone();
+            let unsigned_row = unsigned_row.clone();
             let last_auto_param = last_auto_param.clone();
             let last_param_kind = last_param_kind.clone();
             type_row.connect_selected_notify(move |combo| {
@@ -1319,6 +1451,12 @@ impl StructureTab {
                 } else {
                     *last_param_kind.borrow_mut() = None;
                     type_param_row.set_visible(false);
+                }
+
+                let supports_unsigned = Self::type_supports_unsigned(engine, &selected_type);
+                unsigned_row.set_visible(supports_unsigned);
+                if !supports_unsigned {
+                    unsigned_row.set_active(false);
                 }
             });
         }
@@ -1372,6 +1510,7 @@ impl StructureTab {
         prefs_group.add(&name_row);
         prefs_group.add(&type_row);
         prefs_group.add(&type_param_row);
+        prefs_group.add(&unsigned_row);
         prefs_group.add(&nullable_row);
         prefs_group.add(&default_row);
         prefs_group.add(&extra_row);
@@ -1407,6 +1546,7 @@ impl StructureTab {
             let old_col = existing;
             let type_model = type_model.clone();
             let type_param_row = type_param_row.clone();
+            let unsigned_row = unsigned_row.clone();
             let extra_model = extra_model.clone();
             let extra_row = extra_row.clone();
             save_btn.connect_clicked(move |_| {
@@ -1415,9 +1555,13 @@ impl StructureTab {
                     .string(type_row.selected())
                     .map(|s| s.trim().to_string())
                     .unwrap_or_default();
-                let Some(data_type) =
-                    Self::format_column_data_type(&selected_type, &type_param_row.text())
-                else {
+                let is_unsigned = unsigned_row.is_active()
+                    && Self::type_supports_unsigned(engine, &selected_type);
+                let Some(data_type) = Self::format_column_data_type(
+                    &selected_type,
+                    &type_param_row.text(),
+                    is_unsigned,
+                ) else {
                     return;
                 };
                 if col_name.is_empty() || data_type.is_empty() {
@@ -1924,9 +2068,10 @@ impl StructureTab {
         };
 
         for col in &all_cols {
+            let display_data_type = Self::format_display_data_type(&col.data_type);
             let row = adw::ActionRow::builder()
                 .title(&col.name)
-                .subtitle(&col.data_type)
+                .subtitle(&display_data_type)
                 .build();
 
             let check = gtk::CheckButton::new();
@@ -2166,104 +2311,189 @@ mod tests {
     fn test_parse_and_format_column_data_types() {
         assert_eq!(
             StructureTab::parse_column_data_type("varchar(120)"),
-            ("VARCHAR", Some("120".to_string()))
+            ("VARCHAR", Some("120".to_string()), false)
         );
         assert_eq!(
             StructureTab::parse_column_data_type("character varying(64)"),
-            ("VARCHAR", Some("64".to_string()))
+            ("VARCHAR", Some("64".to_string()), false)
         );
         assert_eq!(
             StructureTab::parse_column_data_type("bpchar(36)"),
-            ("CHAR", Some("36".to_string()))
+            ("CHAR", Some("36".to_string()), false)
         );
         assert_eq!(
             StructureTab::parse_column_data_type("char(10)"),
-            ("CHAR", Some("10".to_string()))
+            ("CHAR", Some("10".to_string()), false)
         );
         assert_eq!(
             StructureTab::parse_column_data_type("decimal(12, 4)"),
-            ("DECIMAL", Some("12, 4".to_string()))
+            ("DECIMAL", Some("12, 4".to_string()), false)
+        );
+        assert_eq!(
+            StructureTab::parse_column_data_type("decimal(10,2) unsigned"),
+            ("DECIMAL", Some("10,2".to_string()), true)
         );
         assert_eq!(
             StructureTab::parse_column_data_type("numeric(10,2)"),
-            ("NUMERIC", Some("10,2".to_string()))
+            ("NUMERIC", Some("10,2".to_string()), false)
         );
         assert_eq!(
             StructureTab::parse_column_data_type("numeric"),
-            ("NUMERIC", Some(String::new()))
+            ("NUMERIC", Some(String::new()), false)
         );
         assert_eq!(
             StructureTab::parse_column_data_type("varbinary(255)"),
-            ("VARBINARY", Some("255".to_string()))
+            ("VARBINARY", Some("255".to_string()), false)
         );
         assert_eq!(
             StructureTab::parse_column_data_type("binary(16)"),
-            ("BINARY", Some("16".to_string()))
+            ("BINARY", Some("16".to_string()), false)
         );
         assert_eq!(
             StructureTab::parse_column_data_type("bit(8)"),
-            ("BIT", Some("8".to_string()))
+            ("BIT", Some("8".to_string()), false)
         );
         assert_eq!(
             StructureTab::parse_column_data_type("bit varying(64)"),
-            ("VARBIT", Some("64".to_string()))
+            ("VARBIT", Some("64".to_string()), false)
         );
         assert_eq!(
             StructureTab::parse_column_data_type("timestamp(3) with time zone"),
-            ("TIMESTAMPTZ", Some("3".to_string()))
+            ("TIMESTAMPTZ", Some("3".to_string()), false)
         );
         assert_eq!(
             StructureTab::parse_column_data_type("enum('active','pending')"),
-            ("ENUM", Some("'active','pending'".to_string()))
+            ("ENUM", Some("'active','pending'".to_string()), false)
+        );
+        assert_eq!(
+            StructureTab::parse_column_data_type("enum('signed','unsigned')"),
+            ("ENUM", Some("'signed','unsigned'".to_string()), false)
         );
         assert_eq!(
             StructureTab::parse_column_data_type("set('read','write')"),
-            ("SET", Some("'read','write'".to_string()))
+            ("SET", Some("'read','write'".to_string()), false)
         );
         assert_eq!(
             StructureTab::parse_column_data_type("int4"),
-            ("INT", None)
+            ("INT", None, false)
+        );
+        assert_eq!(
+            StructureTab::parse_column_data_type("int unsigned"),
+            ("INT", None, true)
+        );
+        assert_eq!(
+            StructureTab::parse_column_data_type("int(10) unsigned"),
+            ("INT", None, true)
+        );
+        assert_eq!(
+            StructureTab::parse_column_data_type("bigint(20) unsigned"),
+            ("BIGINT", None, true)
+        );
+        assert_eq!(
+            StructureTab::parse_column_data_type("smallint(5) unsigned"),
+            ("SMALLINT", None, true)
+        );
+        assert_eq!(
+            StructureTab::parse_column_data_type("tinyint(3) unsigned"),
+            ("TINYINT", None, true)
+        );
+        assert_eq!(
+            StructureTab::parse_column_data_type("tinyint(1) unsigned"),
+            ("TINYINT", None, true)
+        );
+        assert_eq!(
+            StructureTab::parse_column_data_type("tinyint(1)"),
+            ("BOOLEAN", None, false)
+        );
+        assert_eq!(
+            StructureTab::parse_column_data_type("double unsigned"),
+            ("DOUBLE", None, true)
         );
 
         assert_eq!(
-            StructureTab::format_column_data_type("VARCHAR", "255"),
+            StructureTab::format_column_data_type("VARCHAR", "255", false),
             Some("VARCHAR(255)".to_string())
         );
         assert_eq!(
-            StructureTab::format_column_data_type("CHAR", "36"),
+            StructureTab::format_column_data_type("VARCHAR", "255", true),
+            Some("VARCHAR(255)".to_string())
+        );
+        assert_eq!(
+            StructureTab::format_column_data_type("CHAR", "36", false),
             Some("CHAR(36)".to_string())
         );
         assert_eq!(
-            StructureTab::format_column_data_type("DECIMAL", "10,2"),
+            StructureTab::format_column_data_type("DECIMAL", "10,2", false),
             Some("DECIMAL(10,2)".to_string())
         );
         assert_eq!(
-            StructureTab::format_column_data_type("NUMERIC", ""),
+            StructureTab::format_column_data_type("DECIMAL", "10,2", true),
+            Some("DECIMAL(10,2) UNSIGNED".to_string())
+        );
+        assert_eq!(
+            StructureTab::format_column_data_type("NUMERIC", "", false),
             Some("NUMERIC".to_string())
         );
         assert_eq!(
-            StructureTab::format_column_data_type("TIMESTAMP", ""),
+            StructureTab::format_column_data_type("NUMERIC", "", true),
+            Some("NUMERIC UNSIGNED".to_string())
+        );
+        assert_eq!(
+            StructureTab::format_column_data_type("TIMESTAMP", "", false),
             Some("TIMESTAMP".to_string())
         );
         assert_eq!(
-            StructureTab::format_column_data_type("TIMESTAMP", "3"),
+            StructureTab::format_column_data_type("TIMESTAMP", "3", false),
             Some("TIMESTAMP(3)".to_string())
         );
         assert_eq!(
-            StructureTab::format_column_data_type("ENUM", "'a', 'b'"),
+            StructureTab::format_column_data_type("ENUM", "'a', 'b'", false),
             Some("ENUM('a', 'b')".to_string())
         );
         assert_eq!(
-            StructureTab::format_column_data_type("ENUM", ""),
+            StructureTab::format_column_data_type("ENUM", "", false),
             None
         );
         assert_eq!(
-            StructureTab::format_column_data_type("VARCHAR", ""),
+            StructureTab::format_column_data_type("VARCHAR", "", false),
             None
         );
         assert_eq!(
-            StructureTab::format_column_data_type("INT", ""),
+            StructureTab::format_column_data_type("INT", "", false),
             Some("INT".to_string())
+        );
+        assert_eq!(
+            StructureTab::format_column_data_type("INT", "", true),
+            Some("INT UNSIGNED".to_string())
+        );
+        assert_eq!(
+            StructureTab::format_column_data_type("BIGINT", "", true),
+            Some("BIGINT UNSIGNED".to_string())
+        );
+
+        assert_eq!(
+            StructureTab::format_display_data_type("decimal(8,2) unsigned"),
+            "unsigned decimal(8,2)"
+        );
+        assert_eq!(
+            StructureTab::format_display_data_type("int unsigned"),
+            "unsigned int"
+        );
+        assert_eq!(
+            StructureTab::format_display_data_type("unsigned decimal(8,2)"),
+            "unsigned decimal(8,2)"
+        );
+        assert_eq!(
+            StructureTab::format_display_data_type("varchar(255)"),
+            "varchar(255)"
+        );
+        assert_eq!(
+            StructureTab::format_display_data_type("enum('signed','unsigned')"),
+            "enum('signed','unsigned')"
+        );
+        assert_eq!(
+            StructureTab::parse_column_data_type("unsigned decimal(8,2)"),
+            ("DECIMAL", Some("8,2".to_string()), true)
         );
     }
 
@@ -2326,7 +2556,7 @@ mod tests {
                 let default_param = StructureTab::param_spec_for_type(ty)
                     .map(|s| s.default_value)
                     .unwrap_or("");
-                let formatted = StructureTab::format_column_data_type(ty, default_param);
+                let formatted = StructureTab::format_column_data_type(ty, default_param, false);
                 assert!(
                     formatted.as_deref().is_some_and(|s| !s.is_empty()),
                     "Type '{}' for {:?} failed to format with default param '{}'",
@@ -2336,20 +2566,36 @@ mod tests {
                 );
             }
         }
+
+        assert!(StructureTab::type_supports_unsigned(DbEngine::MySql, "INT"));
+        assert!(StructureTab::type_supports_unsigned(DbEngine::MySql, "BIGINT"));
+        assert!(StructureTab::type_supports_unsigned(DbEngine::MySql, "SMALLINT"));
+        assert!(StructureTab::type_supports_unsigned(DbEngine::MySql, "TINYINT"));
+        assert!(StructureTab::type_supports_unsigned(DbEngine::MySql, "DECIMAL"));
+        assert!(StructureTab::type_supports_unsigned(DbEngine::MySql, "NUMERIC"));
+        assert!(StructureTab::type_supports_unsigned(DbEngine::MySql, "FLOAT"));
+        assert!(StructureTab::type_supports_unsigned(DbEngine::MySql, "DOUBLE"));
+        assert!(StructureTab::type_supports_unsigned(DbEngine::MySql, "REAL"));
+        assert!(!StructureTab::type_supports_unsigned(DbEngine::MySql, "BOOLEAN"));
+        assert!(!StructureTab::type_supports_unsigned(DbEngine::MySql, "VARCHAR"));
+        assert!(!StructureTab::type_supports_unsigned(DbEngine::Postgres, "INT"));
+        assert!(!StructureTab::type_supports_unsigned(DbEngine::Postgres, "BIGINT"));
     }
 
     #[test]
     fn test_build_column_type_options_per_engine() {
-        let (mysql_opts, mysql_idx, mysql_param) =
+        let (mysql_opts, mysql_idx, mysql_param, mysql_unsigned) =
             StructureTab::build_column_type_options(DbEngine::MySql, None);
         assert_eq!(mysql_idx, 0);
         assert_eq!(mysql_param, None);
+        assert!(!mysql_unsigned);
         assert_eq!(mysql_opts, MYSQL_COLUMN_DATA_TYPES);
 
-        let (pg_opts, pg_idx, pg_param) =
+        let (pg_opts, pg_idx, pg_param, pg_unsigned) =
             StructureTab::build_column_type_options(DbEngine::Postgres, None);
         assert_eq!(pg_idx, 0);
         assert_eq!(pg_param, None);
+        assert!(!pg_unsigned);
         assert_eq!(pg_opts, POSTGRES_COLUMN_DATA_TYPES);
 
         let existing_pg_col = ColumnInfo {
@@ -2361,9 +2607,46 @@ mod tests {
             default_value: None,
             extra: String::new(),
         };
-        let (pg_edit_opts, pg_edit_idx, _) =
+        let (pg_edit_opts, pg_edit_idx, _, pg_edit_unsigned) =
             StructureTab::build_column_type_options(DbEngine::Postgres, Some(&existing_pg_col));
         assert_eq!(pg_edit_opts[pg_edit_idx], "JSONB");
+        assert!(!pg_edit_unsigned);
+
+        let existing_mysql_unsigned_col = ColumnInfo {
+            ordinal: 1,
+            name: "id".to_string(),
+            data_type: "bigint(20) unsigned".to_string(),
+            is_nullable: false,
+            is_primary_key: true,
+            default_value: None,
+            extra: "auto_increment".to_string(),
+        };
+        let (mysql_edit_opts, mysql_edit_idx, mysql_edit_param, mysql_edit_unsigned) =
+            StructureTab::build_column_type_options(
+                DbEngine::MySql,
+                Some(&existing_mysql_unsigned_col),
+            );
+        assert_eq!(mysql_edit_opts[mysql_edit_idx], "BIGINT");
+        assert_eq!(mysql_edit_param, None);
+        assert!(mysql_edit_unsigned);
+
+        let existing_mysql_dec_unsigned = ColumnInfo {
+            ordinal: 2,
+            name: "price".to_string(),
+            data_type: "decimal(10,2) unsigned".to_string(),
+            is_nullable: false,
+            is_primary_key: false,
+            default_value: Some("0.00".to_string()),
+            extra: String::new(),
+        };
+        let (dec_opts, dec_idx, dec_param, dec_unsigned) =
+            StructureTab::build_column_type_options(
+                DbEngine::MySql,
+                Some(&existing_mysql_dec_unsigned),
+            );
+        assert_eq!(dec_opts[dec_idx], "DECIMAL");
+        assert_eq!(dec_param, Some("10,2".to_string()));
+        assert!(dec_unsigned);
     }
 
     #[test]

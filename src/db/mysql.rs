@@ -1443,6 +1443,19 @@ mod tests {
             MySqlDriver::format_column_spec(&on_update_ts, false),
             "`updated_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP"
         );
+
+        let unsigned_col = ColumnSpec {
+            name: "amount".to_string(),
+            data_type: "DECIMAL(10,2) UNSIGNED".to_string(),
+            is_nullable: false,
+            default_value: Some("0.00".to_string()),
+            extra: None,
+            is_primary_key: false,
+        };
+        assert_eq!(
+            MySqlDriver::format_column_spec(&unsigned_col, false),
+            "`amount` DECIMAL(10,2) UNSIGNED NOT NULL DEFAULT 0.00"
+        );
     }
 
     #[test]
