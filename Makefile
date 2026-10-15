@@ -1,5 +1,5 @@
 APP_NAME     := dbased
-APP_ID       := io.github.tsndr.dbased
+APP_ID       := dev.tsndr.dbased
 CARGO        ?= cargo
 
 PREFIX       ?= /usr/local

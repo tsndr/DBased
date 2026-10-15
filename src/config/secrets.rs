@@ -34,7 +34,7 @@ pub struct SecretStore;
 
 impl SecretStore {
     fn fallback_path() -> PathBuf {
-        if let Some(proj_dirs) = ProjectDirs::from("io", "tsndr", "dbased") {
+        if let Some(proj_dirs) = ProjectDirs::from("dev", "tsndr", "dbased") {
             proj_dirs.config_dir().join(".credentials.toml")
         } else {
             PathBuf::from(".dbased_credentials.toml")
@@ -52,12 +52,12 @@ impl SecretStore {
                 let keyring_ok = match Keyring::new().await {
                     Ok(keyring) => {
                         let db_attrs = HashMap::from([
-                            ("application", "io.github.tsndr.dbased"),
+                            ("application", "dev.tsndr.dbased"),
                             ("bookmark_id", bm_id.as_str()),
                             ("secret_type", "db_password"),
                         ]);
                         let ssh_attrs = HashMap::from([
-                            ("application", "io.github.tsndr.dbased"),
+                            ("application", "dev.tsndr.dbased"),
                             ("bookmark_id", bm_id.as_str()),
                             ("secret_type", "ssh_secret"),
                         ]);
@@ -99,12 +99,12 @@ impl SecretStore {
             .spawn(async move {
                 if let Ok(keyring) = Keyring::new().await {
                     let db_attrs = HashMap::from([
-                        ("application", "io.github.tsndr.dbased"),
+                        ("application", "dev.tsndr.dbased"),
                         ("bookmark_id", bm_id.as_str()),
                         ("secret_type", "db_password"),
                     ]);
                     let ssh_attrs = HashMap::from([
-                        ("application", "io.github.tsndr.dbased"),
+                        ("application", "dev.tsndr.dbased"),
                         ("bookmark_id", bm_id.as_str()),
                         ("secret_type", "ssh_secret"),
                     ]);
@@ -159,7 +159,7 @@ impl SecretStore {
             .spawn(async move {
                 if let Ok(keyring) = Keyring::new().await {
                     let attrs = HashMap::from([
-                        ("application", "io.github.tsndr.dbased"),
+                        ("application", "dev.tsndr.dbased"),
                         ("bookmark_id", bm_id.as_str()),
                     ]);
                     let _ = keyring.delete(&attrs).await;

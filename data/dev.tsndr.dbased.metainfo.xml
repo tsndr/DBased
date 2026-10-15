@@ -1,11 +1,11 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <component type="desktop-application">
-  <id>io.github.tsndr.dbased</id>
+  <id>dev.tsndr.dbased</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT</project_license>
   <name>DBased</name>
   <summary>Clean Libadwaita GUI Database Client for MySQL and PostgreSQL</summary>
-  <developer id="io.github.tsndr">
+  <developer id="dev.tsndr">
     <name>toby</name>
   </developer>
   <description>
@@ -16,7 +16,7 @@
       multiline JSON/JSONB/text cells.
     </p>
   </description>
-  <launchable type="desktop-id">io.github.tsndr.dbased.desktop</launchable>
+  <launchable type="desktop-id">dev.tsndr.dbased.desktop</launchable>
   <url type="homepage">https://github.com/tsndr/dbased</url>
   <url type="bugtracker">https://github.com/tsndr/dbased/issues</url>
   <url type="vcs-browser">https://github.com/tsndr/dbased</url>

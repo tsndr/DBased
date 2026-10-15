@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="data/io.github.tsndr.dbased.svg" width="96" height="96" alt="DBased Icon" />
+  <img src="data/dev.tsndr.dbased.svg" width="96" height="96" alt="DBased Icon" />
   <h1>DBased</h1>
   <p><strong>A fast, native GTK4 &amp; Libadwaita database client for PostgreSQL and MySQL/MariaDB</strong></p>
 

@@ -181,7 +181,7 @@ pub struct BookmarkStore {
 
 impl BookmarkStore {
     pub fn new() -> Self {
-        let path = if let Some(proj_dirs) = ProjectDirs::from("io", "tsndr", "dbased") {
+        let path = if let Some(proj_dirs) = ProjectDirs::from("dev", "tsndr", "dbased") {
             proj_dirs.config_dir().join("bookmarks.toml")
         } else {
             PathBuf::from("bookmarks.toml")

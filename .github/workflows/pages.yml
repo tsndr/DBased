@@ -7,7 +7,7 @@ on:
     paths:
       - 'docs/**'
       - 'assets/**'
-      - 'data/io.github.tsndr.dbased.svg'
+      - 'data/dev.tsndr.dbased.svg'
       - '.github/workflows/pages.yml'
   workflow_dispatch:
 
@@ -38,7 +38,7 @@ jobs:
           cp -rL docs/* _site/
           cp -f docs/.nojekyll _site/.nojekyll
           cp -f assets/*.png _site/assets/
-          cp -f data/io.github.tsndr.dbased.svg _site/icon.svg
+          cp -f data/dev.tsndr.dbased.svg _site/icon.svg
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5

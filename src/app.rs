@@ -3,8 +3,8 @@ use adw::prelude::*;
 use gtk4 as gtk;
 use libadwaita as adw;
 
-const APP_ID: &str = "io.github.tsndr.dbased";
-const APP_ICON_SVG: &str = include_str!("../data/io.github.tsndr.dbased.svg");
+const APP_ID: &str = "dev.tsndr.dbased";
+const APP_ICON_SVG: &str = include_str!("../data/dev.tsndr.dbased.svg");
 
 const CUSTOM_CSS: &str = r#"
 .spreadsheet-grid {

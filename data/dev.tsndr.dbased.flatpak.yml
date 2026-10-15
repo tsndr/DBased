@@ -1,4 +1,4 @@
-id: io.github.tsndr.dbased
+id: dev.tsndr.dbased
 runtime: org.gnome.Platform
 runtime-version: '47'
 sdk: org.gnome.Sdk
