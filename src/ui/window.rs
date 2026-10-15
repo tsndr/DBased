@@ -94,7 +94,6 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
                 BackendEvent::Disconnected => {
                     workspace_content.content_tab.clear_navigation_history();
                     root_stack.set_visible_child_name("connection");
-                    show_toast("Disconnected");
                 }
                 BackendEvent::Refreshed {
                     databases,

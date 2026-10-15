@@ -226,9 +226,8 @@ impl ConnectionPage {
 
         let test_btn = gtk::Button::with_label("Test Connection");
 
-        let quick_connect_btn = gtk::Button::with_label("Quick Connect");
+        let quick_connect_btn = gtk::Button::with_label("Connect");
         quick_connect_btn.add_css_class("suggested-action");
-        quick_connect_btn.add_css_class("pill");
 
         actions_box.append(&status_spinner);
         actions_box.append(&status_label);
