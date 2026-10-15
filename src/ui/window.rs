@@ -41,6 +41,7 @@ pub fn build_main_window(app: &adw::Application) -> adw::ApplicationWindow {
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("DBased")
+        .icon_name("io.github.tsndr.dbased")
         .default_width(1240)
         .default_height(800)
         .content(&toast_overlay)

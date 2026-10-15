@@ -4,6 +4,7 @@ use gtk4 as gtk;
 use libadwaita as adw;
 
 const APP_ID: &str = "io.github.tsndr.dbased";
+const APP_ICON_SVG: &str = include_str!("../data/io.github.tsndr.dbased.svg");
 
 const CUSTOM_CSS: &str = r#"
 .spreadsheet-grid {
@@ -196,6 +197,7 @@ pub fn run_app() -> gtk::glib::ExitCode {
 
     app.connect_startup(|_| {
         sourceview5::init();
+        register_app_icon();
         gtk::Window::set_default_icon_name(APP_ID);
         load_css();
     });
@@ -206,6 +208,49 @@ pub fn run_app() -> gtk::glib::ExitCode {
     });
 
     app.run()
+}
+
+fn register_app_icon() {
+    let mut custom_search_dirs = Vec::new();
+
+    if let Some(base_dirs) = directories::BaseDirs::new() {
+        let user_icons_dir = base_dirs.data_local_dir().join("icons");
+        let user_svg_path = user_icons_dir
+            .join("hicolor")
+            .join("scalable")
+            .join("apps")
+            .join(format!("{APP_ID}.svg"));
+
+        let needs_write = match std::fs::read_to_string(&user_svg_path) {
+            Ok(existing) => existing != APP_ICON_SVG,
+            Err(_) => true,
+        };
+
+        if needs_write {
+            if let Some(parent) = user_svg_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if std::fs::write(&user_svg_path, APP_ICON_SVG).is_ok() {
+                let cache_file = user_icons_dir.join("hicolor").join("icon-theme.cache");
+                let _ = std::fs::remove_file(cache_file);
+            }
+        }
+
+        custom_search_dirs.push(user_icons_dir);
+    }
+
+    if let Some(display) = gtk::gdk::Display::default() {
+        let icon_theme = gtk::IconTheme::for_display(&display);
+        let existing_paths = icon_theme.search_path();
+        let mut new_paths: Vec<&std::path::Path> =
+            custom_search_dirs.iter().map(|p| p.as_path()).collect();
+        for p in &existing_paths {
+            if !custom_search_dirs.iter().any(|c| c == p) {
+                new_paths.push(p.as_path());
+            }
+        }
+        icon_theme.set_search_path(&new_paths);
+    }
 }
 
 pub(crate) fn load_css() {
