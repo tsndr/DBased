@@ -881,6 +881,47 @@ mod tests {
     }
 
     #[test]
+    fn test_export_resultset_csv_and_json() {
+        let rs = RawQueryResultSet {
+            columns: vec!["email".to_string(), "notes".to_string()],
+            rows: vec![
+                vec![
+                    DbValue::Text("alice@example.com".to_string()),
+                    DbValue::Text("line1\nline2".to_string()),
+                ],
+                vec![DbValue::Text("bob@example.com".to_string()), DbValue::Null],
+            ],
+            execution_time_ms: 3,
+        };
+
+        let tmp_dir =
+            std::env::temp_dir().join(format!("dbased_qtab_export_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let csv_path = tmp_dir.join("res.csv");
+        let json_path = tmp_dir.join("res.json");
+
+        export_resultset_csv(&rs, &csv_path).unwrap();
+        let csv_str = std::fs::read_to_string(&csv_path).unwrap();
+        assert_eq!(
+            csv_str,
+            "email,notes\nalice@example.com,\"line1\nline2\"\nbob@example.com,\n"
+        );
+
+        export_resultset_json(&rs, &json_path).unwrap();
+        let json_val: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
+        assert_eq!(
+            json_val,
+            serde_json::json!([
+                {"email": "alice@example.com", "notes": "line1\nline2"},
+                {"email": "bob@example.com", "notes": null}
+            ])
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
     #[ignore]
     fn verify_live_gtk_query_results_column_alignment() {
         use crate::db::models::TableInfo;

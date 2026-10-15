@@ -91,6 +91,35 @@ impl MySqlDriver {
         }
     }
 
+    fn escape_mysql_literal(val: &DbValue) -> String {
+        escape_sql_literal_for_engine(DbEngine::MySql, val)
+    }
+
+    fn is_numeric_sql_literal(s: &str) -> bool {
+        let s = s
+            .strip_prefix('-')
+            .or_else(|| s.strip_prefix('+'))
+            .unwrap_or(s);
+        if s.is_empty() {
+            return false;
+        }
+        let mut dot_count = 0usize;
+        let mut digit_count = 0usize;
+        for c in s.chars() {
+            if c.is_ascii_digit() {
+                digit_count += 1;
+            } else if c == '.' {
+                dot_count += 1;
+                if dot_count > 1 {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        digit_count > 0
+    }
+
     fn build_pk_where_clause(pk: &PrimaryKeyValue) -> Result<String> {
         if pk.columns.is_empty() {
             return Err(anyhow!("Table has no primary key to uniquely identify the row"));
@@ -102,11 +131,159 @@ impl MySqlDriver {
                 format!(
                     "{} = {}",
                     quote_mysql_ident(col),
-                    escape_sql_literal(&DbValue::Text(val.clone()))
+                    Self::escape_mysql_literal(&DbValue::Text(val.clone()))
                 )
             })
             .collect();
         Ok(parts.join(" AND "))
+    }
+
+    fn format_update_row_stmt(
+        db_name: &str,
+        table: &str,
+        upd: &RowUpdate,
+    ) -> Result<Option<String>> {
+        if upd.changes.is_empty() {
+            return Ok(None);
+        }
+        let fq_table = Self::qualified_table(db_name, table);
+        let set_parts: Vec<String> = upd
+            .changes
+            .iter()
+            .map(|(col, val)| {
+                format!(
+                    "{} = {}",
+                    quote_mysql_ident(col),
+                    Self::escape_mysql_literal(val)
+                )
+            })
+            .collect();
+        let where_part = Self::build_pk_where_clause(&upd.pk)?;
+        Ok(Some(format!(
+            "UPDATE {} SET {} WHERE {}",
+            fq_table,
+            set_parts.join(", "),
+            where_part
+        )))
+    }
+
+    fn format_insert_row_stmt(
+        db_name: &str,
+        table: &str,
+        values: &[(String, DbValue)],
+    ) -> String {
+        let fq_table = Self::qualified_table(db_name, table);
+        if values.is_empty() {
+            format!("INSERT INTO {} () VALUES ()", fq_table)
+        } else {
+            let cols: Vec<String> = values.iter().map(|(c, _)| quote_mysql_ident(c)).collect();
+            let vals: Vec<String> = values
+                .iter()
+                .map(|(_, v)| Self::escape_mysql_literal(v))
+                .collect();
+            format!(
+                "INSERT INTO {} ({}) VALUES ({})",
+                fq_table,
+                cols.join(", "),
+                vals.join(", ")
+            )
+        }
+    }
+
+    fn format_delete_row_stmt(
+        db_name: &str,
+        table: &str,
+        pk: &PrimaryKeyValue,
+    ) -> Result<String> {
+        let fq_table = Self::qualified_table(db_name, table);
+        let where_part = Self::build_pk_where_clause(pk)?;
+        Ok(format!("DELETE FROM {} WHERE {}", fq_table, where_part))
+    }
+
+    fn format_add_relation_stmt(db_name: &str, table: &str, fk: &NewForeignKey) -> String {
+        let fq_table = Self::qualified_table(db_name, table);
+        let fq_ref_table = Self::qualified_table(db_name, &fk.referenced_table);
+        let constraint_clause = if fk.constraint_name.trim().is_empty() {
+            String::new()
+        } else {
+            format!("CONSTRAINT {} ", quote_mysql_ident(fk.constraint_name.trim()))
+        };
+        format!(
+            "ALTER TABLE {} ADD {}FOREIGN KEY ({}) REFERENCES {} ({}) ON DELETE {} ON UPDATE {}",
+            fq_table,
+            constraint_clause,
+            quote_mysql_ident(&fk.column_name),
+            fq_ref_table,
+            quote_mysql_ident(&fk.referenced_column),
+            fk.on_delete,
+            fk.on_update
+        )
+    }
+
+    fn format_drop_relation_stmt(db_name: &str, table: &str, constraint_name: &str) -> String {
+        let fq_table = Self::qualified_table(db_name, table);
+        format!(
+            "ALTER TABLE {} DROP FOREIGN KEY {}",
+            fq_table,
+            quote_mysql_ident(constraint_name)
+        )
+    }
+
+    fn format_table_content_queries(
+        db_name: &str,
+        table: &str,
+        columns: &[ColumnInfo],
+        query: &ContentQuery,
+    ) -> (String, String) {
+        let fq_table = Self::qualified_table(db_name, table);
+        let where_clause = if query.search_text.trim().is_empty() {
+            String::new()
+        } else {
+            let trimmed = query.search_text.trim();
+            if let Some(custom_where) = trimmed
+                .strip_prefix("WHERE ")
+                .or_else(|| trimmed.strip_prefix("where "))
+            {
+                format!(" WHERE {}", custom_where)
+            } else if columns.is_empty() {
+                String::new()
+            } else {
+                let escaped_inner = trimmed.replace('\\', "\\\\").replace('\'', "''");
+                let pattern = format!("%{}%", escaped_inner);
+                let predicates: Vec<String> = columns
+                    .iter()
+                    .map(|c| {
+                        format!(
+                            "CAST({} AS CHAR) LIKE '{}'",
+                            quote_mysql_ident(&c.name),
+                            pattern
+                        )
+                    })
+                    .collect();
+                format!(" WHERE ({})", predicates.join(" OR "))
+            }
+        };
+
+        let order_clause = if let Some(sort_col) = &query.sort_column {
+            if columns.iter().any(|c| &c.name == sort_col) {
+                format!(
+                    " ORDER BY {} {}",
+                    quote_mysql_ident(sort_col),
+                    query.sort_direction.as_sql()
+                )
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+
+        let count_sql = format!("SELECT COUNT(*) FROM {}{}", fq_table, where_clause);
+        let data_sql = format!(
+            "SELECT * FROM {}{}{} LIMIT {} OFFSET {}",
+            fq_table, where_clause, order_clause, query.limit, query.offset
+        );
+        (count_sql, data_sql)
     }
 
     fn format_column_spec(spec: &ColumnSpec, include_pk: bool) -> String {
@@ -138,13 +315,13 @@ impl MySqlDriver {
                     || trimmed.eq_ignore_ascii_case("NOW()")
                     || trimmed.ends_with("()")
                     || (trimmed.starts_with('(') && trimmed.ends_with(')'))
-                    || trimmed.chars().all(|c| c.is_ascii_digit() || c == '.' || c == '-')
+                    || Self::is_numeric_sql_literal(trimmed)
                 {
                     parts.push(format!("DEFAULT {}", trimmed));
                 } else {
                     parts.push(format!(
                         "DEFAULT {}",
-                        escape_sql_literal(&DbValue::Text(trimmed.to_string()))
+                        Self::escape_mysql_literal(&DbValue::Text(trimmed.to_string()))
                     ));
                 }
             }
@@ -175,13 +352,13 @@ impl MySqlDriver {
                 if is_generated_def
                     || trimmed.eq_ignore_ascii_case("NULL")
                     || trimmed.eq_ignore_ascii_case("CURRENT_TIMESTAMP")
-                    || trimmed.chars().all(|c| c.is_ascii_digit() || c == '.' || c == '-')
+                    || Self::is_numeric_sql_literal(trimmed)
                 {
                     parts.push(format!("DEFAULT {}", trimmed));
                 } else {
                     parts.push(format!(
                         "DEFAULT {}",
-                        escape_sql_literal(&DbValue::Text(trimmed.to_string()))
+                        Self::escape_mysql_literal(&DbValue::Text(trimmed.to_string()))
                     ));
                 }
             }
@@ -893,49 +1070,9 @@ impl DatabaseDriver for MySqlDriver {
         let pool = self.pool_for_db(db_name).await?;
         let columns = self.get_table_structure(db_name, table).await?;
         let fq_table = Self::qualified_table(db_name, table);
+        let (count_sql, data_sql) =
+            Self::format_table_content_queries(db_name, table, &columns, query);
 
-        let where_clause = if query.search_text.trim().is_empty() {
-            String::new()
-        } else {
-            let trimmed = query.search_text.trim();
-            if let Some(custom_where) = trimmed
-                .strip_prefix("WHERE ")
-                .or_else(|| trimmed.strip_prefix("where "))
-            {
-                format!(" WHERE {}", custom_where)
-            } else if columns.is_empty() {
-                String::new()
-            } else {
-                let pattern = format!("%{}%", trimmed.replace('\'', "''"));
-                let predicates: Vec<String> = columns
-                    .iter()
-                    .map(|c| {
-                        format!(
-                            "CAST({} AS CHAR) LIKE '{}'",
-                            quote_mysql_ident(&c.name),
-                            pattern
-                        )
-                    })
-                    .collect();
-                format!(" WHERE ({})", predicates.join(" OR "))
-            }
-        };
-
-        let order_clause = if let Some(sort_col) = &query.sort_column {
-            if columns.iter().any(|c| &c.name == sort_col) {
-                format!(
-                    " ORDER BY {} {}",
-                    quote_mysql_ident(sort_col),
-                    query.sort_direction.as_sql()
-                )
-            } else {
-                String::new()
-            }
-        } else {
-            String::new()
-        };
-
-        let count_sql = format!("SELECT COUNT(*) FROM {}{}", fq_table, where_clause);
         let count_rows = sqlx::raw_sql(&count_sql)
             .fetch_all(&pool)
             .await
@@ -945,10 +1082,6 @@ impl DatabaseDriver for MySqlDriver {
             .and_then(|r| decode_mysql_cell(r, 0).display_text().parse::<u64>().ok())
             .unwrap_or(0);
 
-        let data_sql = format!(
-            "SELECT * FROM {}{}{} LIMIT {} OFFSET {}",
-            fq_table, where_clause, order_clause, query.limit, query.offset
-        );
         let raw_rows = sqlx::raw_sql(&data_sql)
             .fetch_all(&pool)
             .await
@@ -1002,25 +1135,12 @@ impl DatabaseDriver for MySqlDriver {
             return Ok(0);
         }
         let pool = self.pool_for_db(db_name).await?;
-        let fq_table = Self::qualified_table(db_name, table);
         let mut total_affected = 0u64;
 
         for upd in updates {
-            if upd.changes.is_empty() {
+            let Some(sql) = Self::format_update_row_stmt(db_name, table, upd)? else {
                 continue;
-            }
-            let set_parts: Vec<String> = upd
-                .changes
-                .iter()
-                .map(|(col, val)| format!("{} = {}", quote_mysql_ident(col), escape_sql_literal(val)))
-                .collect();
-            let where_part = Self::build_pk_where_clause(&upd.pk)?;
-            let sql = format!(
-                "UPDATE {} SET {} WHERE {}",
-                fq_table,
-                set_parts.join(", "),
-                where_part
-            );
+            };
             let res = sqlx::raw_sql(&sql)
                 .execute(&pool)
                 .await
@@ -1038,19 +1158,7 @@ impl DatabaseDriver for MySqlDriver {
         values: &[(String, DbValue)],
     ) -> Result<()> {
         let pool = self.pool_for_db(db_name).await?;
-        let fq_table = Self::qualified_table(db_name, table);
-        let sql = if values.is_empty() {
-            format!("INSERT INTO {} () VALUES ()", fq_table)
-        } else {
-            let cols: Vec<String> = values.iter().map(|(c, _)| quote_mysql_ident(c)).collect();
-            let vals: Vec<String> = values.iter().map(|(_, v)| escape_sql_literal(v)).collect();
-            format!(
-                "INSERT INTO {} ({}) VALUES ({})",
-                fq_table,
-                cols.join(", "),
-                vals.join(", ")
-            )
-        };
+        let sql = Self::format_insert_row_stmt(db_name, table, values);
         sqlx::raw_sql(&sql)
             .execute(&pool)
             .await
@@ -1068,12 +1176,10 @@ impl DatabaseDriver for MySqlDriver {
             return Ok(0);
         }
         let pool = self.pool_for_db(db_name).await?;
-        let fq_table = Self::qualified_table(db_name, table);
         let mut deleted = 0u64;
 
         for pk in pks {
-            let where_part = Self::build_pk_where_clause(pk)?;
-            let sql = format!("DELETE FROM {} WHERE {}", fq_table, where_part);
+            let sql = Self::format_delete_row_stmt(db_name, table, pk)?;
             let res = sqlx::raw_sql(&sql)
                 .execute(&pool)
                 .await
@@ -1102,8 +1208,8 @@ impl DatabaseDriver for MySqlDriver {
                AND kcu.TABLE_NAME = {} \
                AND kcu.REFERENCED_TABLE_NAME IS NOT NULL \
              ORDER BY kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION",
-            escape_sql_literal(&DbValue::Text(db_name.to_string())),
-            escape_sql_literal(&DbValue::Text(table.to_string()))
+            Self::escape_mysql_literal(&DbValue::Text(db_name.to_string())),
+            Self::escape_mysql_literal(&DbValue::Text(table.to_string()))
         );
 
         let rows = sqlx::raw_sql(&sql)
@@ -1127,23 +1233,7 @@ impl DatabaseDriver for MySqlDriver {
 
     async fn add_relation(&self, db_name: &str, table: &str, fk: &NewForeignKey) -> Result<()> {
         let pool = self.pool_for_db(db_name).await?;
-        let fq_table = Self::qualified_table(db_name, table);
-        let fq_ref_table = Self::qualified_table(db_name, &fk.referenced_table);
-        let constraint_clause = if fk.constraint_name.trim().is_empty() {
-            String::new()
-        } else {
-            format!("CONSTRAINT {} ", quote_mysql_ident(fk.constraint_name.trim()))
-        };
-        let sql = format!(
-            "ALTER TABLE {} ADD {}FOREIGN KEY ({}) REFERENCES {} ({}) ON DELETE {} ON UPDATE {}",
-            fq_table,
-            constraint_clause,
-            quote_mysql_ident(&fk.column_name),
-            fq_ref_table,
-            quote_mysql_ident(&fk.referenced_column),
-            fk.on_delete,
-            fk.on_update
-        );
+        let sql = Self::format_add_relation_stmt(db_name, table, fk);
         sqlx::raw_sql(&sql)
             .execute(&pool)
             .await
@@ -1158,12 +1248,7 @@ impl DatabaseDriver for MySqlDriver {
         constraint_name: &str,
     ) -> Result<()> {
         let pool = self.pool_for_db(db_name).await?;
-        let fq_table = Self::qualified_table(db_name, table);
-        let sql = format!(
-            "ALTER TABLE {} DROP FOREIGN KEY {}",
-            fq_table,
-            quote_mysql_ident(constraint_name)
-        );
+        let sql = Self::format_drop_relation_stmt(db_name, table, constraint_name);
         sqlx::raw_sql(&sql)
             .execute(&pool)
             .await
@@ -1796,4 +1881,209 @@ mod tests {
         assert_eq!(db_perms[1].privileges, vec!["SELECT", "INSERT", "UPDATE"]);
         assert!(db_perms[1].has_grant_option);
     }
+
+    #[test]
+    fn test_mysql_pk_where_clause_and_backslash_escaping() {
+        let empty_pk = PrimaryKeyValue { columns: vec![] };
+        assert!(MySqlDriver::build_pk_where_clause(&empty_pk).is_err());
+
+        let composite_pk = PrimaryKeyValue {
+            columns: vec![
+                ("tenant`id".to_string(), "acme\\corp".to_string()),
+                ("user'id".to_string(), "o'reilly".to_string()),
+            ],
+        };
+        assert_eq!(
+            MySqlDriver::build_pk_where_clause(&composite_pk).unwrap(),
+            "`tenant``id` = 'acme\\\\corp' AND `user'id` = 'o''reilly'"
+        );
+    }
+
+    #[test]
+    fn test_mysql_column_spec_date_and_version_defaults_are_quoted() {
+        let date_col = ColumnSpec {
+            name: "created_on".to_string(),
+            data_type: "DATE".to_string(),
+            is_nullable: false,
+            default_value: Some("2026-10-15".to_string()),
+            extra: None,
+            is_primary_key: false,
+        };
+        assert_eq!(
+            MySqlDriver::format_column_spec(&date_col, false),
+            "`created_on` DATE NOT NULL DEFAULT '2026-10-15'"
+        );
+
+        let version_col = ColumnSpec {
+            name: "semver".to_string(),
+            data_type: "VARCHAR(16)".to_string(),
+            is_nullable: false,
+            default_value: Some("1.2.3".to_string()),
+            extra: None,
+            is_primary_key: false,
+        };
+        assert_eq!(
+            MySqlDriver::format_column_spec(&version_col, false),
+            "`semver` VARCHAR(16) NOT NULL DEFAULT '1.2.3'"
+        );
+
+        let path_col = ColumnSpec {
+            name: "win_path".to_string(),
+            data_type: "VARCHAR(64)".to_string(),
+            is_nullable: true,
+            default_value: Some("C:\\temp\\".to_string()),
+            extra: None,
+            is_primary_key: false,
+        };
+        assert_eq!(
+            MySqlDriver::format_column_spec(&path_col, false),
+            "`win_path` VARCHAR(64) NULL DEFAULT 'C:\\\\temp\\\\'"
+        );
+    }
+
+    #[test]
+    fn test_mysql_dml_statement_formatting() {
+        let pk = PrimaryKeyValue {
+            columns: vec![("id".to_string(), "42".to_string())],
+        };
+        let empty_upd = RowUpdate {
+            pk: pk.clone(),
+            changes: vec![],
+        };
+        assert_eq!(
+            MySqlDriver::format_update_row_stmt("shop", "orders", &empty_upd).unwrap(),
+            None
+        );
+
+        let upd = RowUpdate {
+            pk: pk.clone(),
+            changes: vec![
+                ("notes".to_string(), DbValue::Text("C:\\dir\\'quote'".to_string())),
+                ("deleted_at".to_string(), DbValue::Null),
+            ],
+        };
+        assert_eq!(
+            MySqlDriver::format_update_row_stmt("shop", "orders", &upd)
+                .unwrap()
+                .unwrap(),
+            "UPDATE `shop`.`orders` SET `notes` = 'C:\\\\dir\\\\''quote''', `deleted_at` = NULL WHERE `id` = '42'"
+        );
+
+        assert_eq!(
+            MySqlDriver::format_insert_row_stmt("shop", "orders", &[]),
+            "INSERT INTO `shop`.`orders` () VALUES ()"
+        );
+        assert_eq!(
+            MySqlDriver::format_insert_row_stmt(
+                "shop",
+                "orders",
+                &[
+                    ("path".to_string(), DbValue::Text("a\\b".to_string())),
+                    ("flag".to_string(), DbValue::Null),
+                ]
+            ),
+            "INSERT INTO `shop`.`orders` (`path`, `flag`) VALUES ('a\\\\b', NULL)"
+        );
+
+        assert_eq!(
+            MySqlDriver::format_delete_row_stmt("shop", "orders", &pk).unwrap(),
+            "DELETE FROM `shop`.`orders` WHERE `id` = '42'"
+        );
+        let no_pk = PrimaryKeyValue { columns: vec![] };
+        assert!(MySqlDriver::format_delete_row_stmt("shop", "orders", &no_pk).is_err());
+    }
+
+    #[test]
+    fn test_mysql_relation_ddl_formatting() {
+        let named_fk = NewForeignKey {
+            constraint_name: "fk_orders_user".to_string(),
+            column_name: "user_id".to_string(),
+            referenced_table: "users".to_string(),
+            referenced_column: "id".to_string(),
+            on_delete: "CASCADE".to_string(),
+            on_update: "RESTRICT".to_string(),
+        };
+        assert_eq!(
+            MySqlDriver::format_add_relation_stmt("shop", "orders", &named_fk),
+            "ALTER TABLE `shop`.`orders` ADD CONSTRAINT `fk_orders_user` FOREIGN KEY (`user_id`) REFERENCES `shop`.`users` (`id`) ON DELETE CASCADE ON UPDATE RESTRICT"
+        );
+
+        let unnamed_fk = NewForeignKey {
+            constraint_name: "   ".to_string(),
+            ..named_fk
+        };
+        assert_eq!(
+            MySqlDriver::format_add_relation_stmt("shop", "orders", &unnamed_fk),
+            "ALTER TABLE `shop`.`orders` ADD FOREIGN KEY (`user_id`) REFERENCES `shop`.`users` (`id`) ON DELETE CASCADE ON UPDATE RESTRICT"
+        );
+
+        assert_eq!(
+            MySqlDriver::format_drop_relation_stmt("shop", "orders", "fk_orders_user"),
+            "ALTER TABLE `shop`.`orders` DROP FOREIGN KEY `fk_orders_user`"
+        );
+    }
+
+    #[test]
+    fn test_mysql_table_content_query_formatting() {
+        let cols = vec![
+            ColumnInfo {
+                ordinal: 1,
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                is_nullable: false,
+                is_primary_key: true,
+                default_value: None,
+                extra: String::new(),
+            },
+            ColumnInfo {
+                ordinal: 2,
+                name: "name".to_string(),
+                data_type: "varchar(64)".to_string(),
+                is_nullable: false,
+                is_primary_key: false,
+                default_value: None,
+                extra: String::new(),
+            },
+        ];
+
+        // 1. Free-text search with valid sort column
+        let q1 = ContentQuery {
+            limit: 50,
+            offset: 100,
+            sort_column: Some("name".to_string()),
+            sort_direction: SortDirection::Desc,
+            search_text: "o'reilly".to_string(),
+        };
+        let (count_sql, data_sql) =
+            MySqlDriver::format_table_content_queries("shop", "users", &cols, &q1);
+        assert_eq!(
+            count_sql,
+            "SELECT COUNT(*) FROM `shop`.`users` WHERE (CAST(`id` AS CHAR) LIKE '%o''reilly%' OR CAST(`name` AS CHAR) LIKE '%o''reilly%')"
+        );
+        assert_eq!(
+            data_sql,
+            "SELECT * FROM `shop`.`users` WHERE (CAST(`id` AS CHAR) LIKE '%o''reilly%' OR CAST(`name` AS CHAR) LIKE '%o''reilly%') ORDER BY `name` DESC LIMIT 50 OFFSET 100"
+        );
+
+        // 2. Raw WHERE clause and unknown sort column (ignored to prevent injection)
+        let q2 = ContentQuery {
+            limit: 25,
+            offset: 0,
+            sort_column: Some("non_existent_col; DROP TABLE users".to_string()),
+            sort_direction: SortDirection::Asc,
+            search_text: "WHERE `id` > 10".to_string(),
+        };
+        let (count_sql2, data_sql2) =
+            MySqlDriver::format_table_content_queries("shop", "users", &cols, &q2);
+        assert_eq!(
+            count_sql2,
+            "SELECT COUNT(*) FROM `shop`.`users` WHERE `id` > 10"
+        );
+        assert_eq!(
+            data_sql2,
+            "SELECT * FROM `shop`.`users` WHERE `id` > 10 LIMIT 25 OFFSET 0"
+        );
+    }
 }
+
+

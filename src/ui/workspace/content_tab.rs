@@ -2256,38 +2256,7 @@ impl ContentTab {
             return;
         }
 
-        // Group dirty cells by row_idx
-        let mut by_row: HashMap<usize, Vec<(String, DbValue)>> = HashMap::new();
-        for ((row_idx, col_name), val) in dirty {
-            by_row.entry(row_idx).or_default().push((col_name, val));
-        }
-
-        let mut updates = Vec::new();
-        for (row_idx, changes) in by_row {
-            if let Some(row_data) = page.rows.get(row_idx) {
-                if let Some(pk) = &row_data.pk {
-                    updates.push(RowUpdate {
-                        pk: pk.clone(),
-                        changes,
-                    });
-                }
-            }
-        }
-
-        let mut inserts = Vec::new();
-        for draft_map in drafts {
-            let mut row_vals = Vec::new();
-            for col in &page.columns {
-                if let Some(v) = draft_map.get(&col.name) {
-                    // Omit auto-increment NULL primary keys so the DB generates them
-                    if col.is_primary_key && v.is_null() {
-                        continue;
-                    }
-                    row_vals.push((col.name.clone(), v.clone()));
-                }
-            }
-            inserts.push(row_vals);
-        }
+        let (updates, inserts) = build_pending_content_changes(&page, &dirty, &drafts);
 
         let query_for_refresh = self.query_state.borrow().clone();
         let _ = self
@@ -2460,6 +2429,51 @@ pub fn initial_draft_value_for_column(col: &ColumnInfo) -> DbValue {
     }
 }
 
+pub fn build_pending_content_changes(
+    page: &TablePage,
+    dirty: &HashMap<(usize, String), DbValue>,
+    drafts: &[HashMap<String, DbValue>],
+) -> (Vec<RowUpdate>, Vec<Vec<(String, DbValue)>>) {
+    let mut by_row: std::collections::BTreeMap<usize, Vec<(String, DbValue)>> =
+        std::collections::BTreeMap::new();
+    for ((row_idx, col_name), val) in dirty {
+        by_row
+            .entry(*row_idx)
+            .or_default()
+            .push((col_name.clone(), val.clone()));
+    }
+
+    let mut updates = Vec::new();
+    for (row_idx, mut changes) in by_row {
+        if let Some(row_data) = page.rows.get(row_idx) {
+            if let Some(pk) = &row_data.pk {
+                changes.sort_by(|a, b| a.0.cmp(&b.0));
+                updates.push(RowUpdate {
+                    pk: pk.clone(),
+                    changes,
+                });
+            }
+        }
+    }
+
+    let mut inserts = Vec::new();
+    for draft_map in drafts {
+        let mut row_vals = Vec::new();
+        for col in &page.columns {
+            if let Some(v) = draft_map.get(&col.name) {
+                // Omit auto-increment NULL primary keys so the DB generates them
+                if col.is_primary_key && v.is_null() {
+                    continue;
+                }
+                row_vals.push((col.name.clone(), v.clone()));
+            }
+        }
+        inserts.push(row_vals);
+    }
+
+    (updates, inserts)
+}
+
 fn export_page_to_csv(page: &TablePage, path: &std::path::Path) -> anyhow::Result<()> {
     let mut wtr = csv::Writer::from_path(path)?;
     let headers: Vec<&str> = page.columns.iter().map(|c| c.name.as_str()).collect();
@@ -2501,7 +2515,7 @@ fn export_page_to_json(page: &TablePage, path: &std::path::Path) -> anyhow::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::models::{is_long_text_data_type, parse_enum_data_type};
+    use crate::db::models::{TableRowData, is_long_text_data_type, parse_enum_data_type};
 
     #[test]
     fn test_columns_show_full_content_when_available_width_allows() {
@@ -2666,5 +2680,186 @@ mod tests {
             DbValue::Text("member".to_string())
         );
     }
+
+    #[test]
+    fn test_build_pending_content_changes_groups_updates_and_omits_null_pk_on_drafts() {
+        let page = TablePage {
+            database: "shop".to_string(),
+            table: "orders".to_string(),
+            columns: vec![
+                ColumnInfo {
+                    ordinal: 1,
+                    name: "id".to_string(),
+                    data_type: "int".to_string(),
+                    is_nullable: false,
+                    is_primary_key: true,
+                    default_value: None,
+                    extra: "auto_increment".to_string(),
+                },
+                ColumnInfo {
+                    ordinal: 2,
+                    name: "status".to_string(),
+                    data_type: "varchar(32)".to_string(),
+                    is_nullable: false,
+                    is_primary_key: false,
+                    default_value: None,
+                    extra: String::new(),
+                },
+                ColumnInfo {
+                    ordinal: 3,
+                    name: "notes".to_string(),
+                    data_type: "text".to_string(),
+                    is_nullable: true,
+                    is_primary_key: false,
+                    default_value: None,
+                    extra: String::new(),
+                },
+            ],
+            rows: vec![
+                TableRowData {
+                    pk: Some(PrimaryKeyValue {
+                        columns: vec![("id".to_string(), "10".to_string())],
+                    }),
+                    values: vec![
+                        DbValue::Text("10".to_string()),
+                        DbValue::Text("pending".to_string()),
+                        DbValue::Null,
+                    ],
+                },
+                TableRowData {
+                    // Row without PK (e.g., view or keyless table) must be skipped
+                    pk: None,
+                    values: vec![
+                        DbValue::Text("11".to_string()),
+                        DbValue::Text("pending".to_string()),
+                        DbValue::Null,
+                    ],
+                },
+            ],
+            total_rows: 2,
+            page_limit: 100,
+            page_offset: 0,
+        };
+
+        let mut dirty = HashMap::new();
+        dirty.insert(
+            (0, "status".to_string()),
+            DbValue::Text("shipped".to_string()),
+        );
+        dirty.insert((0, "notes".to_string()), DbValue::Null);
+        dirty.insert(
+            (1, "status".to_string()),
+            DbValue::Text("ignored_no_pk".to_string()),
+        );
+
+        let mut draft1 = HashMap::new();
+        // NULL primary key must be omitted so AUTO_INCREMENT / SERIAL generates it
+        draft1.insert("id".to_string(), DbValue::Null);
+        draft1.insert("status".to_string(), DbValue::Text("new".to_string()));
+        draft1.insert("notes".to_string(), DbValue::Null);
+
+        let mut draft2 = HashMap::new();
+        // Explicit primary key must be preserved
+        draft2.insert("id".to_string(), DbValue::Text("99".to_string()));
+        draft2.insert("status".to_string(), DbValue::Text("manual".to_string()));
+
+        let (updates, inserts) =
+            build_pending_content_changes(&page, &dirty, &[draft1, draft2]);
+
+        assert_eq!(updates.len(), 1);
+        assert_eq!(
+            updates[0].pk.columns,
+            vec![("id".to_string(), "10".to_string())]
+        );
+        assert_eq!(
+            updates[0].changes,
+            vec![
+                ("notes".to_string(), DbValue::Null),
+                ("status".to_string(), DbValue::Text("shipped".to_string())),
+            ]
+        );
+
+        assert_eq!(
+            inserts,
+            vec![
+                vec![
+                    ("status".to_string(), DbValue::Text("new".to_string())),
+                    ("notes".to_string(), DbValue::Null),
+                ],
+                vec![
+                    ("id".to_string(), DbValue::Text("99".to_string())),
+                    ("status".to_string(), DbValue::Text("manual".to_string())),
+                ],
+            ]
+        );
+    }
+
+    #[test]
+    fn test_export_page_to_csv_and_json() {
+        let page = TablePage {
+            database: "shop".to_string(),
+            table: "items".to_string(),
+            columns: vec![
+                ColumnInfo {
+                    ordinal: 1,
+                    name: "id".to_string(),
+                    data_type: "int".to_string(),
+                    is_nullable: false,
+                    is_primary_key: true,
+                    default_value: None,
+                    extra: String::new(),
+                },
+                ColumnInfo {
+                    ordinal: 2,
+                    name: "label".to_string(),
+                    data_type: "text".to_string(),
+                    is_nullable: true,
+                    is_primary_key: false,
+                    default_value: None,
+                    extra: String::new(),
+                },
+            ],
+            rows: vec![
+                TableRowData {
+                    pk: None,
+                    values: vec![
+                        DbValue::Text("1".to_string()),
+                        DbValue::Text("a, \"quoted\" item".to_string()),
+                    ],
+                },
+                TableRowData {
+                    pk: None,
+                    values: vec![DbValue::Text("2".to_string()), DbValue::Null],
+                },
+            ],
+            total_rows: 2,
+            page_limit: 100,
+            page_offset: 0,
+        };
+
+        let tmp_dir =
+            std::env::temp_dir().join(format!("dbased_page_export_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+        let csv_path = tmp_dir.join("items.csv");
+        let json_path = tmp_dir.join("items.json");
+
+        export_page_to_csv(&page, &csv_path).unwrap();
+        let csv_str = std::fs::read_to_string(&csv_path).unwrap();
+        assert_eq!(csv_str, "id,label\n1,\"a, \"\"quoted\"\" item\"\n2,\n");
+
+        export_page_to_json(&page, &json_path).unwrap();
+        let json_val: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&json_path).unwrap()).unwrap();
+        assert_eq!(
+            json_val,
+            serde_json::json!([
+                {"id": "1", "label": "a, \"quoted\" item"},
+                {"id": "2", "label": null}
+            ])
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
 }
+
 

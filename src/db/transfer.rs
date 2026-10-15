@@ -1001,7 +1001,7 @@ async fn import_json_array_into_table(
                 });
             let db_val = match json_cell {
                 None | Some(serde_json::Value::Null) => DbValue::Null,
-                Some(serde_json::Value::String(s)) => coerce_imported_str_value(s, col_info),
+                Some(serde_json::Value::String(s)) => coerce_imported_json_str_value(s, col_info),
                 Some(serde_json::Value::Bool(b)) => DbValue::Text(b.to_string()),
                 Some(serde_json::Value::Number(n)) => DbValue::Text(n.to_string()),
                 Some(other) => DbValue::Text(other.to_string()),
@@ -1230,19 +1230,26 @@ fn collect_files_recursive(dir: &Path, ext: &str, out: &mut Vec<PathBuf>) -> Res
     Ok(())
 }
 
-/// Converts a raw CSV or JSON string value into `DbValue`, coercing empty strings `""`
-/// or `"NULL"` into `DbValue::Null` when appropriate for the column's schema.
+/// Converts a raw CSV string value into `DbValue`, coercing empty strings `""`
+/// or `"NULL"` into `DbValue::Null` when the column is nullable.
 pub fn coerce_imported_str_value(raw: &str, col: &ColumnInfo) -> DbValue {
-    if col.is_nullable && raw.eq_ignore_ascii_case("NULL") {
+    if col.is_nullable && (raw.is_empty() || raw.eq_ignore_ascii_case("NULL")) {
+        return DbValue::Null;
+    }
+    DbValue::Text(raw.to_string())
+}
+
+/// Converts a JSON string value into `DbValue`. Unlike CSV (where `NULL` is exported as `""`),
+/// JSON represents SQL `NULL` as native `null`, so `""` on a nullable text column is preserved
+/// as `DbValue::Text("")` while `""` on nullable non-text or enum columns is coerced to `DbValue::Null`.
+pub fn coerce_imported_json_str_value(raw: &str, col: &ColumnInfo) -> DbValue {
+    if col.is_nullable && raw.eq_ignore_ascii_case("NULL") && !is_text_like_column(&col.data_type) {
         return DbValue::Null;
     }
     if raw.is_empty() && col.is_nullable {
-        // For nullable columns, CSV exports write DbValue::Null as `""`, and non-text types
-        // (numeric, boolean, date/time, uuid, enum) reject empty strings `""`.
         if !is_text_like_column(&col.data_type) || col.enum_values().is_some() {
             return DbValue::Null;
         }
-        return DbValue::Null;
     }
     DbValue::Text(raw.to_string())
 }
@@ -2097,6 +2104,31 @@ INSERT INTO "tbl;name" (`col;name`) VALUES ('val;1');
         assert_eq!(
             coerce_imported_str_value("NULL", &not_null_text),
             DbValue::Text("NULL".to_string())
+        );
+
+        let nullable_text = ColumnInfo {
+            ordinal: 4,
+            name: "bio".to_string(),
+            data_type: "text".to_string(),
+            is_nullable: true,
+            is_primary_key: false,
+            default_value: None,
+            extra: String::new(),
+        };
+        // In CSV, "" on a nullable column represents NULL, whereas in JSON (where NULL is native `null`),
+        // `""` on a nullable text column must preserve the empty string `""`!
+        assert_eq!(coerce_imported_str_value("", &nullable_text), DbValue::Null);
+        assert_eq!(
+            coerce_imported_json_str_value("", &nullable_text),
+            DbValue::Text(String::new())
+        );
+        assert_eq!(
+            coerce_imported_json_str_value("", &nullable_int),
+            DbValue::Null
+        );
+        assert_eq!(
+            coerce_imported_json_str_value("", &nullable_enum),
+            DbValue::Null
         );
     }
 

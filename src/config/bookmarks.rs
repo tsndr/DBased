@@ -114,8 +114,12 @@ impl ConnectionProfile {
         } else {
             urlencoding::decode(parsed.username()).unwrap_or_else(|_| parsed.username().into()).to_string()
         };
-        let db_password = parsed.password().unwrap_or("").to_string();
-        let default_database = parsed.path().trim_start_matches('/').to_string();
+        let db_password = parsed
+            .password()
+            .map(|p| urlencoding::decode(p).unwrap_or_else(|_| p.to_string()))
+            .unwrap_or_default();
+        let raw_db = parsed.path().trim_start_matches('/');
+        let default_database = urlencoding::decode(raw_db).unwrap_or_else(|_| raw_db.to_string());
 
         let bookmark = ConnectionBookmark {
             id: Uuid::new_v4().to_string(),
@@ -254,6 +258,24 @@ mod tests {
         assert_eq!(my.bookmark.engine, DbEngine::MySql);
         assert_eq!(my.bookmark.port, 3306);
         assert_eq!(my.bookmark.default_database, "shop");
+
+        // Percent-encoded credentials and database name, plus scheme aliases and default username
+        let encoded = ConnectionProfile::from_url(
+            "postgresql://user%40domain:p%40ss%3A1%2F2@db.internal/my%20db",
+        )
+        .unwrap();
+        assert_eq!(encoded.bookmark.engine, DbEngine::Postgres);
+        assert_eq!(encoded.bookmark.username, "user@domain");
+        assert_eq!(encoded.db_password, "p@ss:1/2");
+        assert_eq!(encoded.bookmark.default_database, "my db");
+
+        let maria_default_user = ConnectionProfile::from_url("mariadb://localhost").unwrap();
+        assert_eq!(maria_default_user.bookmark.engine, DbEngine::MySql);
+        assert_eq!(maria_default_user.bookmark.username, "root");
+        assert_eq!(maria_default_user.bookmark.port, 3306);
+        assert_eq!(maria_default_user.bookmark.default_database, "");
+
+        assert!(ConnectionProfile::from_url("sqlite:///tmp/test.db").is_err());
     }
 
     #[test]

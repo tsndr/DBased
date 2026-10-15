@@ -490,65 +490,17 @@ pub fn spawn_db_worker() -> (Sender<BackendCommand>, Receiver<BackendEvent>) {
                         query_for_refresh,
                     } => {
                         if let Some(ref sess) = session {
-                            let mut err_msg = None;
-                            let mut updated_count = 0u64;
-                            let mut inserted_count = 0u64;
-
-                            if !updates.is_empty() {
-                                match sess
-                                    .driver
-                                    .commit_cell_updates(&database, &table, &updates)
-                                    .await
-                                {
-                                    Ok(cnt) => updated_count += cnt,
-                                    Err(e) => err_msg = Some(format!("{:#}", e)),
-                                }
-                            }
-
-                            if err_msg.is_none() {
-                                for ins in &inserts {
-                                    match sess.driver.insert_row(&database, &table, ins).await {
-                                        Ok(()) => inserted_count += 1,
-                                        Err(e) => {
-                                            err_msg = Some(format!("{:#}", e));
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-
-                            if let Some(err) = err_msg {
-                                let _ = evt_tx.send(BackendEvent::Error(err)).await;
-                            } else {
-                                let toast = match (updated_count > 0, inserted_count > 0) {
-                                    (true, true) => Some(format!(
-                                        "Saved changes ({} updated, {} inserted)",
-                                        updated_count, inserted_count
-                                    )),
-                                    (true, false) => {
-                                        Some(format!("Committed {} row update(s)", updated_count))
-                                    }
-                                    (false, true) => {
-                                        Some(format!("Inserted {} row(s)", inserted_count))
-                                    }
-                                    (false, false) => Some("Changes committed".to_string()),
-                                };
-                                match sess
-                                    .driver
-                                    .get_table_content(&database, &table, &query_for_refresh)
-                                    .await
-                                {
-                                    Ok(page) => {
-                                        let _ = evt_tx
-                                            .send(BackendEvent::ContentLoaded { page, toast })
-                                            .await;
-                                    }
-                                    Err(e) => {
-                                        let _ = evt_tx
-                                            .send(BackendEvent::Error(format!("{:#}", e)))
-                                            .await;
-                                    }
-                                }
+                            for evt in commit_content_changes_with_driver(
+                                sess.driver.as_ref(),
+                                &database,
+                                &table,
+                                &updates,
+                                &inserts,
+                                &query_for_refresh,
+                            )
+                            .await
+                            {
+                                let _ = evt_tx.send(evt).await;
                             }
                         }
                     }
@@ -1061,3 +1013,338 @@ async fn load_users_and_permissions(
         toast,
     })
 }
+
+async fn commit_content_changes_with_driver(
+    driver: &dyn DatabaseDriver,
+    database: &str,
+    table: &str,
+    updates: &[RowUpdate],
+    inserts: &[Vec<(String, DbValue)>],
+    query_for_refresh: &ContentQuery,
+) -> Vec<BackendEvent> {
+    let mut err_msg = None;
+    let mut updated_count = 0u64;
+    let mut inserted_count = 0u64;
+
+    if !updates.is_empty() {
+        match driver.commit_cell_updates(database, table, updates).await {
+            Ok(cnt) => updated_count += cnt,
+            Err(e) => err_msg = Some(format!("{:#}", e)),
+        }
+    }
+
+    if err_msg.is_none() {
+        for ins in inserts {
+            match driver.insert_row(database, table, ins).await {
+                Ok(()) => inserted_count += 1,
+                Err(e) => {
+                    err_msg = Some(format!("{:#}", e));
+                    break;
+                }
+            }
+        }
+    }
+
+    let mut events = Vec::new();
+    if let Some(err) = err_msg {
+        if updated_count > 0 || inserted_count > 0 {
+            if let Ok(page) = driver
+                .get_table_content(database, table, query_for_refresh)
+                .await
+            {
+                events.push(BackendEvent::ContentLoaded { page, toast: None });
+            }
+        }
+        events.push(BackendEvent::Error(err));
+    } else {
+        let toast = match (updated_count > 0, inserted_count > 0) {
+            (true, true) => Some(format!(
+                "Saved changes ({} updated, {} inserted)",
+                updated_count, inserted_count
+            )),
+            (true, false) => Some(format!("Committed {} row update(s)", updated_count)),
+            (false, true) => Some(format!("Inserted {} row(s)", inserted_count)),
+            (false, false) => Some("Changes committed".to_string()),
+        };
+        match driver
+            .get_table_content(database, table, query_for_refresh)
+            .await
+        {
+            Ok(page) => {
+                events.push(BackendEvent::ContentLoaded { page, toast });
+            }
+            Err(e) => {
+                events.push(BackendEvent::Error(format!("{:#}", e)));
+            }
+        }
+    }
+    events
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::anyhow;
+    use async_trait::async_trait;
+    use std::sync::Mutex;
+
+    struct WorkerMockDriver {
+        users: Vec<DbUser>,
+        fail_on_insert_idx: Option<usize>,
+        inserted_count: Mutex<usize>,
+        updated_batches: Mutex<usize>,
+    }
+
+    impl WorkerMockDriver {
+        fn new() -> Self {
+            Self {
+                users: vec![
+                    DbUser {
+                        username: "alice".to_string(),
+                        host: Some("%".to_string()),
+                        global_privileges: vec!["SELECT".to_string()],
+                        has_grant_option: false,
+                    },
+                    DbUser {
+                        username: "bob".to_string(),
+                        host: Some("localhost".to_string()),
+                        global_privileges: vec![],
+                        has_grant_option: false,
+                    },
+                ],
+                fail_on_insert_idx: None,
+                inserted_count: Mutex::new(0),
+                updated_batches: Mutex::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl DatabaseDriver for WorkerMockDriver {
+        fn engine(&self) -> DbEngine {
+            DbEngine::MySql
+        }
+        async fn list_databases(&self) -> Result<Vec<String>> {
+            Ok(vec!["shop".to_string()])
+        }
+        async fn create_database(&self, _: &CreateDatabaseSpec) -> Result<()> {
+            Ok(())
+        }
+        async fn use_database(&mut self, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn list_tables(&self, _: &str) -> Result<Vec<TableInfo>> {
+            Ok(vec![])
+        }
+        async fn get_table_structure(&self, _: &str, _: &str) -> Result<Vec<ColumnInfo>> {
+            Ok(vec![])
+        }
+        async fn alter_column(&self, _: &str, _: &str, _: ColumnAlterOp) -> Result<()> {
+            Ok(())
+        }
+        async fn get_table_indexes(&self, _: &str, _: &str) -> Result<Vec<IndexInfo>> {
+            Ok(vec![])
+        }
+        async fn alter_index(&self, _: &str, _: &str, _: IndexAlterOp) -> Result<()> {
+            Ok(())
+        }
+        async fn get_table_content(
+            &self,
+            db_name: &str,
+            table: &str,
+            query: &ContentQuery,
+        ) -> Result<TablePage> {
+            Ok(TablePage {
+                database: db_name.to_string(),
+                table: table.to_string(),
+                columns: vec![],
+                rows: vec![],
+                total_rows: (*self.inserted_count.lock().unwrap()) as u64,
+                page_limit: query.limit,
+                page_offset: query.offset,
+            })
+        }
+        async fn commit_cell_updates(&self, _: &str, _: &str, updates: &[RowUpdate]) -> Result<u64> {
+            *self.updated_batches.lock().unwrap() += 1;
+            Ok(updates.len() as u64)
+        }
+        async fn insert_row(&self, _: &str, _: &str, _: &[(String, DbValue)]) -> Result<()> {
+            let mut cnt = self.inserted_count.lock().unwrap();
+            if self.fail_on_insert_idx == Some(*cnt) {
+                return Err(anyhow!("Duplicate key on insert #{}", *cnt));
+            }
+            *cnt += 1;
+            Ok(())
+        }
+        async fn delete_rows(&self, _: &str, _: &str, _: &[PrimaryKeyValue]) -> Result<u64> {
+            Ok(0)
+        }
+        async fn get_relations(&self, _: &str, _: &str) -> Result<Vec<ForeignKeyInfo>> {
+            Ok(vec![])
+        }
+        async fn add_relation(&self, _: &str, _: &str, _: &NewForeignKey) -> Result<()> {
+            Ok(())
+        }
+        async fn drop_relation(&self, _: &str, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn execute_raw_query(&self, _: &str, _: &str) -> Result<RawQueryOutcome> {
+            unreachable!()
+        }
+        async fn list_users(&self) -> Result<Vec<DbUser>> {
+            Ok(self.users.clone())
+        }
+        async fn create_user(&self, _: &CreateUserSpec) -> Result<()> {
+            Ok(())
+        }
+        async fn update_user(&self, _: &UpdateUserSpec) -> Result<()> {
+            Ok(())
+        }
+        async fn drop_user(&self, _: &str, _: Option<&str>) -> Result<()> {
+            Ok(())
+        }
+        async fn get_database_permissions(
+            &self,
+            username: &str,
+            host: Option<&str>,
+        ) -> Result<Vec<DatabasePermission>> {
+            Ok(vec![DatabasePermission {
+                username: username.to_string(),
+                host: host.map(|s| s.to_string()),
+                database: format!("db_for_{}_{}", username, host.unwrap_or("")),
+                privileges: vec!["SELECT".to_string()],
+                has_grant_option: false,
+            }])
+        }
+        async fn set_database_permissions(&self, _: &DbPermissionSpec) -> Result<()> {
+            Ok(())
+        }
+        async fn revoke_database_permissions(&self, _: &str, _: Option<&str>, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn get_create_database_ddl(&self, _: &str) -> Result<String> {
+            Ok(String::new())
+        }
+        async fn get_table_ddl(&self, _: &str, _: &str, _: bool) -> Result<TableDdlParts> {
+            Ok(TableDdlParts::default())
+        }
+        async fn fetch_table_rows_batch(
+            &self,
+            _: &str,
+            _: &str,
+            _: usize,
+            _: u64,
+            _: u32,
+        ) -> Result<Vec<Vec<DbValue>>> {
+            Ok(vec![])
+        }
+        async fn truncate_table(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn insert_rows_batch(
+            &self,
+            _: &str,
+            _: &str,
+            _: &[String],
+            _: &[Vec<DbValue>],
+        ) -> Result<u64> {
+            Ok(0)
+        }
+        async fn execute_sql_statement(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_load_users_and_permissions_preferred_vs_fallback() {
+        let driver = WorkerMockDriver::new();
+
+        // 1. Preferred user exists -> selects bob@localhost
+        let evt = load_users_and_permissions(
+            &driver,
+            Some(("bob".to_string(), Some("localhost".to_string()))),
+            Some("Updated user".to_string()),
+        )
+        .await
+        .unwrap();
+        match evt {
+            BackendEvent::UsersLoaded {
+                selected_user,
+                db_permissions,
+                toast,
+                ..
+            } => {
+                assert_eq!(
+                    selected_user,
+                    Some(("bob".to_string(), Some("localhost".to_string())))
+                );
+                assert_eq!(db_permissions[0].database, "db_for_bob_localhost");
+                assert_eq!(toast.as_deref(), Some("Updated user"));
+            }
+            _ => panic!("Expected UsersLoaded"),
+        }
+
+        // 2. Preferred user was dropped -> falls back to first user (alice@%)
+        let evt_fallback = load_users_and_permissions(
+            &driver,
+            Some(("deleted_user".to_string(), Some("%".to_string()))),
+            None,
+        )
+        .await
+        .unwrap();
+        match evt_fallback {
+            BackendEvent::UsersLoaded {
+                selected_user,
+                db_permissions,
+                ..
+            } => {
+                assert_eq!(
+                    selected_user,
+                    Some(("alice".to_string(), Some("%".to_string())))
+                );
+                assert_eq!(db_permissions[0].database, "db_for_alice_%");
+            }
+            _ => panic!("Expected UsersLoaded"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_commit_content_changes_reloads_page_on_partial_failure() {
+        let mut driver = WorkerMockDriver::new();
+        // Fail on the second insert (index 1) after 1 update and 1 insert have already succeeded
+        driver.fail_on_insert_idx = Some(1);
+
+        let updates = vec![RowUpdate {
+            pk: PrimaryKeyValue {
+                columns: vec![("id".to_string(), "1".to_string())],
+            },
+            changes: vec![("name".to_string(), DbValue::Text("Updated".to_string()))],
+        }];
+        let inserts = vec![
+            vec![("name".to_string(), DbValue::Text("Row A".to_string()))],
+            vec![("name".to_string(), DbValue::Text("Row B".to_string()))],
+        ];
+        let events = commit_content_changes_with_driver(
+            &driver,
+            "shop",
+            "users",
+            &updates,
+            &inserts,
+            &ContentQuery::default(),
+        )
+        .await;
+
+        // Because 1 update and 1 insert were already committed before insert #2 failed,
+        // it must emit ContentLoaded (to clear stale dirty state) followed by Error!
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            &events[0],
+            BackendEvent::ContentLoaded { page, toast: None } if page.total_rows == 1
+        ));
+        assert!(matches!(
+            &events[1],
+            BackendEvent::Error(msg) if msg.contains("Duplicate key on insert #1")
+        ));
+    }
+}
+

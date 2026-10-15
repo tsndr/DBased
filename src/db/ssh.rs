@@ -195,6 +195,11 @@ impl Drop for SshTunnel {
 
 fn expand_tilde(path: &str) -> PathBuf {
     let trimmed = path.trim();
+    if trimmed == "~" {
+        if let Some(user_dirs) = directories::UserDirs::new() {
+            return user_dirs.home_dir().to_path_buf();
+        }
+    }
     if let Some(rest) = trimmed.strip_prefix("~/") {
         if let Some(user_dirs) = directories::UserDirs::new() {
             return user_dirs.home_dir().join(rest);
@@ -202,3 +207,42 @@ fn expand_tilde(path: &str) -> PathBuf {
     }
     PathBuf::from(trimmed)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_expand_tilde_paths() {
+        let abs = expand_tilde("  /etc/ssh/ssh_host_ed25519_key  ");
+        assert_eq!(abs, PathBuf::from("/etc/ssh/ssh_host_ed25519_key"));
+
+        if let Some(user_dirs) = directories::UserDirs::new() {
+            let home = user_dirs.home_dir();
+            assert_eq!(
+                expand_tilde("~/.ssh/id_ed25519"),
+                home.join(".ssh/id_ed25519")
+            );
+            assert_eq!(expand_tilde("~"), home.to_path_buf());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ssh_tunnel_drop_signals_shutdown_and_aborts_listener() {
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        let listener_task = tokio::spawn(async move {
+            let _ = shutdown_rx.changed().await;
+        });
+        let abort_check = listener_task.abort_handle();
+        let tunnel = SshTunnel {
+            local_port: 45678,
+            shutdown_tx,
+            listener_task,
+        };
+        assert_eq!(tunnel.local_port(), 45678);
+        drop(tunnel);
+        tokio::task::yield_now().await;
+        assert!(abort_check.is_finished());
+    }
+}
+

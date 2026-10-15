@@ -125,6 +125,31 @@ impl PostgresDriver {
         Ok(parts.join(" AND "))
     }
 
+    fn is_numeric_sql_literal(s: &str) -> bool {
+        let s = s
+            .strip_prefix('-')
+            .or_else(|| s.strip_prefix('+'))
+            .unwrap_or(s);
+        if s.is_empty() {
+            return false;
+        }
+        let mut dot_count = 0usize;
+        let mut digit_count = 0usize;
+        for c in s.chars() {
+            if c.is_ascii_digit() {
+                digit_count += 1;
+            } else if c == '.' {
+                dot_count += 1;
+                if dot_count > 1 {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        digit_count > 0
+    }
+
     fn format_default_expr(def: &str) -> String {
         let trimmed = def.trim();
         if trimmed.eq_ignore_ascii_case("NULL")
@@ -134,7 +159,7 @@ impl PostgresDriver {
             || trimmed.eq_ignore_ascii_case("false")
             || trimmed.ends_with("()")
             || trimmed.contains("::")
-            || trimmed.chars().all(|c| c.is_ascii_digit() || c == '.' || c == '-')
+            || Self::is_numeric_sql_literal(trimmed)
         {
             trimmed.to_string()
         } else {
@@ -331,13 +356,14 @@ impl PostgresDriver {
         stmts.join(";\n")
     }
 
-    async fn reorder_columns(
-        &self,
-        db_name: &str,
+    fn format_reorder_columns_stmts(
         table: &str,
+        current_cols: &[ColumnInfo],
         new_order: &[String],
-    ) -> Result<()> {
-        let current_cols = self.get_table_structure(db_name, table).await?;
+        relations: &[ForeignKeyInfo],
+        existing_indexes: &[IndexInfo],
+        pk_constraint_name: Option<&str>,
+    ) -> Result<Vec<String>> {
         if new_order.len() != current_cols.len() {
             return Err(anyhow!("Column count mismatch during reorder"));
         }
@@ -357,34 +383,11 @@ impl PostgresDriver {
             .zip(new_cols.iter())
             .position(|(old_c, new_c)| old_c.name != new_c.name)
         else {
-            return Ok(());
+            return Ok(Vec::new());
         };
 
         let affected_cols = &new_cols[start_idx..];
-        let relations = self.get_relations(db_name, table).await?;
-        let existing_indexes = self.get_table_indexes(db_name, table).await.unwrap_or_default();
         let fq_table = Self::qualified_table(table);
-        let pool = self.pool_for_db(db_name).await?;
-
-        // Check if any affected column is a primary key; if so, find the PK constraint name
-        let pk_affected = affected_cols.iter().any(|c| c.is_primary_key);
-        let pk_constraint_name = if pk_affected {
-            let escaped_table = escape_sql_literal(&DbValue::Text(table.to_string()));
-            let pk_sql = format!(
-                "SELECT tc.constraint_name \
-                 FROM information_schema.table_constraints tc \
-                 WHERE tc.constraint_type = 'PRIMARY KEY' \
-                   AND tc.table_schema = 'public' \
-                   AND tc.table_name = {}",
-                escaped_table
-            );
-            let rows = sqlx::raw_sql(&pk_sql).fetch_all(&pool).await?;
-            rows.first()
-                .map(|r| decode_pg_cell(r, 0).display_text().to_string())
-        } else {
-            None
-        };
-
         let mut stmts = vec!["BEGIN".to_string()];
 
         // 1. Rename affected columns to temporary names
@@ -452,7 +455,7 @@ impl PostgresDriver {
         }
 
         // 3. Recreate foreign keys on affected columns
-        for fk in &relations {
+        for fk in relations {
             if affected_cols.iter().any(|c| c.name == fk.column_name) {
                 stmts.push(format!(
                     "ALTER TABLE {} DROP CONSTRAINT {}",
@@ -479,7 +482,7 @@ impl PostgresDriver {
             stmts.push(format!(
                 "ALTER TABLE {} DROP CONSTRAINT {}",
                 fq_table,
-                quote_pg_ident(&pk_cname)
+                quote_pg_ident(pk_cname)
             ));
 
             let pk_cols: Vec<String> = new_cols
@@ -491,7 +494,7 @@ impl PostgresDriver {
                 stmts.push(format!(
                     "ALTER TABLE {} ADD CONSTRAINT {} PRIMARY KEY ({})",
                     fq_table,
-                    quote_pg_ident(&pk_cname),
+                    quote_pg_ident(pk_cname),
                     pk_cols.join(", ")
                 ));
             }
@@ -508,7 +511,7 @@ impl PostgresDriver {
         }
 
         // 6. Recreate any secondary indexes that referenced affected columns
-        for idx in &existing_indexes {
+        for idx in existing_indexes {
             if !idx.is_primary
                 && idx
                     .columns
@@ -528,6 +531,192 @@ impl PostgresDriver {
         }
 
         stmts.push("COMMIT".to_string());
+        Ok(stmts)
+    }
+
+    fn format_update_row_stmt(table: &str, upd: &RowUpdate) -> Result<Option<String>> {
+        if upd.changes.is_empty() {
+            return Ok(None);
+        }
+        let fq_table = Self::qualified_table(table);
+        let set_parts: Vec<String> = upd
+            .changes
+            .iter()
+            .map(|(col, val)| format!("{} = {}", quote_pg_ident(col), escape_sql_literal(val)))
+            .collect();
+        let where_part = Self::build_pk_where_clause(&upd.pk)?;
+        Ok(Some(format!(
+            "UPDATE {} SET {} WHERE {}",
+            fq_table,
+            set_parts.join(", "),
+            where_part
+        )))
+    }
+
+    fn format_insert_row_stmt(table: &str, values: &[(String, DbValue)]) -> String {
+        let fq_table = Self::qualified_table(table);
+        if values.is_empty() {
+            format!("INSERT INTO {} DEFAULT VALUES", fq_table)
+        } else {
+            let cols: Vec<String> = values.iter().map(|(c, _)| quote_pg_ident(c)).collect();
+            let vals: Vec<String> = values.iter().map(|(_, v)| escape_sql_literal(v)).collect();
+            format!(
+                "INSERT INTO {} ({}) VALUES ({})",
+                fq_table,
+                cols.join(", "),
+                vals.join(", ")
+            )
+        }
+    }
+
+    fn format_delete_row_stmt(table: &str, pk: &PrimaryKeyValue) -> Result<String> {
+        let fq_table = Self::qualified_table(table);
+        let where_part = Self::build_pk_where_clause(pk)?;
+        Ok(format!("DELETE FROM {} WHERE {}", fq_table, where_part))
+    }
+
+    fn format_add_relation_stmt(table: &str, fk: &NewForeignKey) -> String {
+        let fq_table = Self::qualified_table(table);
+        let fq_ref_table = Self::qualified_table(&fk.referenced_table);
+        let constraint_clause = if fk.constraint_name.trim().is_empty() {
+            String::new()
+        } else {
+            format!("CONSTRAINT {} ", quote_pg_ident(fk.constraint_name.trim()))
+        };
+        format!(
+            "ALTER TABLE {} ADD {}FOREIGN KEY ({}) REFERENCES {} ({}) ON DELETE {} ON UPDATE {}",
+            fq_table,
+            constraint_clause,
+            quote_pg_ident(&fk.column_name),
+            fq_ref_table,
+            quote_pg_ident(&fk.referenced_column),
+            fk.on_delete,
+            fk.on_update
+        )
+    }
+
+    fn format_drop_relation_stmt(table: &str, constraint_name: &str) -> String {
+        let fq_table = Self::qualified_table(table);
+        format!(
+            "ALTER TABLE {} DROP CONSTRAINT {}",
+            fq_table,
+            quote_pg_ident(constraint_name)
+        )
+    }
+
+    fn format_table_content_queries(
+        table: &str,
+        columns: &[ColumnInfo],
+        query: &ContentQuery,
+    ) -> (String, String) {
+        let fq_table = Self::qualified_table(table);
+        let where_clause = if query.search_text.trim().is_empty() {
+            String::new()
+        } else {
+            let trimmed = query.search_text.trim();
+            if let Some(custom_where) = trimmed
+                .strip_prefix("WHERE ")
+                .or_else(|| trimmed.strip_prefix("where "))
+            {
+                format!(" WHERE {}", custom_where)
+            } else if columns.is_empty() {
+                String::new()
+            } else {
+                let pattern = format!("%{}%", trimmed.replace('\'', "''"));
+                let predicates: Vec<String> = columns
+                    .iter()
+                    .map(|c| format!("{}::text ILIKE '{}'", quote_pg_ident(&c.name), pattern))
+                    .collect();
+                format!(" WHERE ({})", predicates.join(" OR "))
+            }
+        };
+
+        let order_clause = if let Some(sort_col) = &query.sort_column {
+            if columns.iter().any(|c| &c.name == sort_col) {
+                format!(
+                    " ORDER BY {} {}",
+                    quote_pg_ident(sort_col),
+                    query.sort_direction.as_sql()
+                )
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+
+        let count_sql = format!("SELECT COUNT(*) FROM {}{}", fq_table, where_clause);
+        let data_sql = format!(
+            "SELECT * FROM {}{}{} LIMIT {} OFFSET {}",
+            fq_table, where_clause, order_clause, query.limit, query.offset
+        );
+        (count_sql, data_sql)
+    }
+
+    async fn reorder_columns(
+        &self,
+        db_name: &str,
+        table: &str,
+        new_order: &[String],
+    ) -> Result<()> {
+        let current_cols = self.get_table_structure(db_name, table).await?;
+        if new_order.len() != current_cols.len() {
+            return Err(anyhow!("Column count mismatch during reorder"));
+        }
+
+        let mut new_cols = Vec::with_capacity(new_order.len());
+        for col_name in new_order {
+            let col = current_cols
+                .iter()
+                .find(|c| &c.name == col_name)
+                .cloned()
+                .ok_or_else(|| anyhow!("Column '{}' not found in table '{}'", col_name, table))?;
+            new_cols.push(col);
+        }
+
+        let Some(start_idx) = current_cols
+            .iter()
+            .zip(new_cols.iter())
+            .position(|(old_c, new_c)| old_c.name != new_c.name)
+        else {
+            return Ok(());
+        };
+
+        let affected_cols = &new_cols[start_idx..];
+        let relations = self.get_relations(db_name, table).await?;
+        let existing_indexes = self.get_table_indexes(db_name, table).await.unwrap_or_default();
+        let pool = self.pool_for_db(db_name).await?;
+
+        // Check if any affected column is a primary key; if so, find the PK constraint name
+        let pk_affected = affected_cols.iter().any(|c| c.is_primary_key);
+        let pk_constraint_name = if pk_affected {
+            let escaped_table = escape_sql_literal(&DbValue::Text(table.to_string()));
+            let pk_sql = format!(
+                "SELECT tc.constraint_name \
+                 FROM information_schema.table_constraints tc \
+                 WHERE tc.constraint_type = 'PRIMARY KEY' \
+                   AND tc.table_schema = 'public' \
+                   AND tc.table_name = {}",
+                escaped_table
+            );
+            let rows = sqlx::raw_sql(&pk_sql).fetch_all(&pool).await?;
+            rows.first()
+                .map(|r| decode_pg_cell(r, 0).display_text().to_string())
+        } else {
+            None
+        };
+
+        let stmts = Self::format_reorder_columns_stmts(
+            table,
+            &current_cols,
+            new_order,
+            &relations,
+            &existing_indexes,
+            pk_constraint_name.as_deref(),
+        )?;
+        if stmts.is_empty() {
+            return Ok(());
+        }
         let batch_sql = stmts.join(";\n");
 
         sqlx::raw_sql(&batch_sql)
@@ -1454,43 +1643,8 @@ impl DatabaseDriver for PostgresDriver {
         let pool = self.pool_for_db(db_name).await?;
         let columns = self.get_table_structure(db_name, table).await?;
         let fq_table = Self::qualified_table(table);
+        let (count_sql, data_sql) = Self::format_table_content_queries(table, &columns, query);
 
-        let where_clause = if query.search_text.trim().is_empty() {
-            String::new()
-        } else {
-            let trimmed = query.search_text.trim();
-            if let Some(custom_where) = trimmed
-                .strip_prefix("WHERE ")
-                .or_else(|| trimmed.strip_prefix("where "))
-            {
-                format!(" WHERE {}", custom_where)
-            } else if columns.is_empty() {
-                String::new()
-            } else {
-                let pattern = format!("%{}%", trimmed.replace('\'', "''"));
-                let predicates: Vec<String> = columns
-                    .iter()
-                    .map(|c| format!("{}::text ILIKE '{}'", quote_pg_ident(&c.name), pattern))
-                    .collect();
-                format!(" WHERE ({})", predicates.join(" OR "))
-            }
-        };
-
-        let order_clause = if let Some(sort_col) = &query.sort_column {
-            if columns.iter().any(|c| &c.name == sort_col) {
-                format!(
-                    " ORDER BY {} {}",
-                    quote_pg_ident(sort_col),
-                    query.sort_direction.as_sql()
-                )
-            } else {
-                String::new()
-            }
-        } else {
-            String::new()
-        };
-
-        let count_sql = format!("SELECT COUNT(*) FROM {}{}", fq_table, where_clause);
         let count_rows = sqlx::raw_sql(&count_sql)
             .fetch_all(&pool)
             .await
@@ -1500,10 +1654,6 @@ impl DatabaseDriver for PostgresDriver {
             .and_then(|r| decode_pg_cell(r, 0).display_text().parse::<u64>().ok())
             .unwrap_or(0);
 
-        let data_sql = format!(
-            "SELECT * FROM {}{}{} LIMIT {} OFFSET {}",
-            fq_table, where_clause, order_clause, query.limit, query.offset
-        );
         let raw_rows = sqlx::raw_sql(&data_sql)
             .fetch_all(&pool)
             .await
@@ -1557,25 +1707,12 @@ impl DatabaseDriver for PostgresDriver {
             return Ok(0);
         }
         let pool = self.pool_for_db(db_name).await?;
-        let fq_table = Self::qualified_table(table);
         let mut total_affected = 0u64;
 
         for upd in updates {
-            if upd.changes.is_empty() {
+            let Some(sql) = Self::format_update_row_stmt(table, upd)? else {
                 continue;
-            }
-            let set_parts: Vec<String> = upd
-                .changes
-                .iter()
-                .map(|(col, val)| format!("{} = {}", quote_pg_ident(col), escape_sql_literal(val)))
-                .collect();
-            let where_part = Self::build_pk_where_clause(&upd.pk)?;
-            let sql = format!(
-                "UPDATE {} SET {} WHERE {}",
-                fq_table,
-                set_parts.join(", "),
-                where_part
-            );
+            };
             let res = sqlx::raw_sql(&sql)
                 .execute(&pool)
                 .await
@@ -1593,19 +1730,7 @@ impl DatabaseDriver for PostgresDriver {
         values: &[(String, DbValue)],
     ) -> Result<()> {
         let pool = self.pool_for_db(db_name).await?;
-        let fq_table = Self::qualified_table(table);
-        let sql = if values.is_empty() {
-            format!("INSERT INTO {} DEFAULT VALUES", fq_table)
-        } else {
-            let cols: Vec<String> = values.iter().map(|(c, _)| quote_pg_ident(c)).collect();
-            let vals: Vec<String> = values.iter().map(|(_, v)| escape_sql_literal(v)).collect();
-            format!(
-                "INSERT INTO {} ({}) VALUES ({})",
-                fq_table,
-                cols.join(", "),
-                vals.join(", ")
-            )
-        };
+        let sql = Self::format_insert_row_stmt(table, values);
         sqlx::raw_sql(&sql)
             .execute(&pool)
             .await
@@ -1623,12 +1748,10 @@ impl DatabaseDriver for PostgresDriver {
             return Ok(0);
         }
         let pool = self.pool_for_db(db_name).await?;
-        let fq_table = Self::qualified_table(table);
         let mut deleted = 0u64;
 
         for pk in pks {
-            let where_part = Self::build_pk_where_clause(pk)?;
-            let sql = format!("DELETE FROM {} WHERE {}", fq_table, where_part);
+            let sql = Self::format_delete_row_stmt(table, pk)?;
             let res = sqlx::raw_sql(&sql)
                 .execute(&pool)
                 .await
@@ -1688,23 +1811,7 @@ impl DatabaseDriver for PostgresDriver {
 
     async fn add_relation(&self, db_name: &str, table: &str, fk: &NewForeignKey) -> Result<()> {
         let pool = self.pool_for_db(db_name).await?;
-        let fq_table = Self::qualified_table(table);
-        let fq_ref_table = Self::qualified_table(&fk.referenced_table);
-        let constraint_clause = if fk.constraint_name.trim().is_empty() {
-            String::new()
-        } else {
-            format!("CONSTRAINT {} ", quote_pg_ident(fk.constraint_name.trim()))
-        };
-        let sql = format!(
-            "ALTER TABLE {} ADD {}FOREIGN KEY ({}) REFERENCES {} ({}) ON DELETE {} ON UPDATE {}",
-            fq_table,
-            constraint_clause,
-            quote_pg_ident(&fk.column_name),
-            fq_ref_table,
-            quote_pg_ident(&fk.referenced_column),
-            fk.on_delete,
-            fk.on_update
-        );
+        let sql = Self::format_add_relation_stmt(table, fk);
         sqlx::raw_sql(&sql)
             .execute(&pool)
             .await
@@ -1719,12 +1826,7 @@ impl DatabaseDriver for PostgresDriver {
         constraint_name: &str,
     ) -> Result<()> {
         let pool = self.pool_for_db(db_name).await?;
-        let fq_table = Self::qualified_table(table);
-        let sql = format!(
-            "ALTER TABLE {} DROP CONSTRAINT {}",
-            fq_table,
-            quote_pg_ident(constraint_name)
-        );
+        let sql = Self::format_drop_relation_stmt(table, constraint_name);
         sqlx::raw_sql(&sql)
             .execute(&pool)
             .await
@@ -2522,4 +2624,325 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn test_pg_pk_where_clause_and_default_expr_edge_cases() {
+        let empty_pk = PrimaryKeyValue { columns: vec![] };
+        assert!(PostgresDriver::build_pk_where_clause(&empty_pk).is_err());
+
+        let composite_pk = PrimaryKeyValue {
+            columns: vec![
+                ("tenant\"id".to_string(), "acme".to_string()),
+                ("user_id".to_string(), "o'reilly".to_string()),
+            ],
+        };
+        assert_eq!(
+            PostgresDriver::build_pk_where_clause(&composite_pk).unwrap(),
+            "\"tenant\"\"id\"::text = 'acme' AND \"user_id\"::text = 'o''reilly'"
+        );
+
+        // Date and semver defaults must be quoted, while numeric and cast expressions stay raw
+        assert_eq!(
+            PostgresDriver::format_default_expr("2026-10-15"),
+            "'2026-10-15'"
+        );
+        assert_eq!(PostgresDriver::format_default_expr("1.2.3"), "'1.2.3'");
+        assert_eq!(PostgresDriver::format_default_expr("-42.5"), "-42.5");
+        assert_eq!(
+            PostgresDriver::format_default_expr("'active'::character varying"),
+            "'active'::character varying"
+        );
+
+        // Renaming an ENUM column drops the old enum type as well
+        let renamed_enum = ColumnSpec {
+            name: "order_state".to_string(),
+            data_type: "ENUM('open', 'closed')".to_string(),
+            is_nullable: false,
+            default_value: Some("open".to_string()),
+            extra: None,
+            is_primary_key: false,
+        };
+        assert_eq!(
+            PostgresDriver::format_modify_column_stmt("orders", "status", None, &renamed_enum),
+            "ALTER TABLE \"public\".\"orders\" RENAME COLUMN \"status\" TO \"order_state\";\n\
+             ALTER TABLE \"public\".\"orders\" ALTER COLUMN \"order_state\" DROP DEFAULT;\n\
+             DROP TYPE IF EXISTS \"orders_order_state_enum_new\";\n\
+             CREATE TYPE \"orders_order_state_enum_new\" AS ENUM ('open', 'closed');\n\
+             ALTER TABLE \"public\".\"orders\" ALTER COLUMN \"order_state\" TYPE \"orders_order_state_enum_new\" USING \"order_state\"::text::\"orders_order_state_enum_new\";\n\
+             DROP TYPE IF EXISTS \"orders_status_enum\";\n\
+             DROP TYPE IF EXISTS \"orders_order_state_enum\";\n\
+             ALTER TYPE \"orders_order_state_enum_new\" RENAME TO \"orders_order_state_enum\";\n\
+             ALTER TABLE \"public\".\"orders\" ALTER COLUMN \"order_state\" SET NOT NULL;\n\
+             ALTER TABLE \"public\".\"orders\" ALTER COLUMN \"order_state\" SET DEFAULT 'open'"
+        );
+    }
+
+    #[test]
+    fn test_pg_reorder_columns_transaction_plan() {
+        let cols = vec![
+            ColumnInfo {
+                ordinal: 1,
+                name: "id".to_string(),
+                data_type: "integer".to_string(),
+                is_nullable: false,
+                is_primary_key: true,
+                default_value: Some("nextval('orders_id_seq'::regclass)".to_string()),
+                extra: String::new(),
+            },
+            ColumnInfo {
+                ordinal: 2,
+                name: "user_id".to_string(),
+                data_type: "integer".to_string(),
+                is_nullable: false,
+                is_primary_key: false,
+                default_value: None,
+                extra: String::new(),
+            },
+            ColumnInfo {
+                ordinal: 3,
+                name: "seq_num".to_string(),
+                data_type: "bigint".to_string(),
+                is_nullable: false,
+                is_primary_key: false,
+                default_value: None,
+                extra: "ALWAYS".to_string(),
+            },
+        ];
+
+        // 1. Unchanged order is a no-op
+        let same_order = vec!["id".to_string(), "user_id".to_string(), "seq_num".to_string()];
+        assert!(
+            PostgresDriver::format_reorder_columns_stmts(
+                "orders",
+                &cols,
+                &same_order,
+                &[],
+                &[],
+                None
+            )
+            .unwrap()
+            .is_empty()
+        );
+
+        // 2. Mismatched length or unknown column errors
+        assert!(
+            PostgresDriver::format_reorder_columns_stmts(
+                "orders",
+                &cols,
+                &["id".to_string()],
+                &[],
+                &[],
+                None
+            )
+            .is_err()
+        );
+        assert!(
+            PostgresDriver::format_reorder_columns_stmts(
+                "orders",
+                &cols,
+                &["id".to_string(), "user_id".to_string(), "missing".to_string()],
+                &[],
+                &[],
+                None
+            )
+            .is_err()
+        );
+
+        // 3. Reorder affecting PK, sequence default, identity column, FK, and secondary index
+        let new_order = vec!["user_id".to_string(), "id".to_string(), "seq_num".to_string()];
+        let relations = vec![ForeignKeyInfo {
+            constraint_name: "orders_user_id_fkey".to_string(),
+            column_name: "user_id".to_string(),
+            referenced_table: "users".to_string(),
+            referenced_column: "id".to_string(),
+            update_rule: "NO ACTION".to_string(),
+            delete_rule: "CASCADE".to_string(),
+        }];
+        let indexes = vec![
+            IndexInfo {
+                name: "orders_pkey".to_string(),
+                columns: vec!["id".to_string()],
+                is_unique: true,
+                is_primary: true,
+                index_type: "PRIMARY".to_string(),
+                method: "BTREE".to_string(),
+            },
+            IndexInfo {
+                name: "idx_orders_user".to_string(),
+                columns: vec!["user_id".to_string()],
+                is_unique: false,
+                is_primary: false,
+                index_type: "INDEX".to_string(),
+                method: "BTREE".to_string(),
+            },
+        ];
+
+        let stmts = PostgresDriver::format_reorder_columns_stmts(
+            "orders",
+            &cols,
+            &new_order,
+            &relations,
+            &indexes,
+            Some("orders_pkey"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            stmts,
+            vec![
+                "BEGIN",
+                "ALTER TABLE \"public\".\"orders\" RENAME COLUMN \"user_id\" TO \"__dbased_mv_0_user_id\"",
+                "ALTER TABLE \"public\".\"orders\" RENAME COLUMN \"id\" TO \"__dbased_mv_1_id\"",
+                "ALTER TABLE \"public\".\"orders\" RENAME COLUMN \"seq_num\" TO \"__dbased_mv_2_seq_num\"",
+                "ALTER TABLE \"public\".\"orders\" ADD COLUMN \"user_id\" integer",
+                "UPDATE \"public\".\"orders\" SET \"user_id\" = \"__dbased_mv_0_user_id\"",
+                "ALTER TABLE \"public\".\"orders\" ALTER COLUMN \"user_id\" SET NOT NULL",
+                "ALTER TABLE \"public\".\"orders\" ADD COLUMN \"id\" integer",
+                "UPDATE \"public\".\"orders\" SET \"id\" = \"__dbased_mv_1_id\"",
+                "ALTER TABLE \"public\".\"orders\" ALTER COLUMN \"id\" SET NOT NULL",
+                "ALTER TABLE \"public\".\"orders\" ALTER COLUMN \"id\" SET DEFAULT nextval('orders_id_seq'::regclass)",
+                "ALTER SEQUENCE orders_id_seq OWNED BY \"public\".\"orders\".\"id\"",
+                "ALTER TABLE \"public\".\"orders\" ADD COLUMN \"seq_num\" bigint",
+                "UPDATE \"public\".\"orders\" SET \"seq_num\" = \"__dbased_mv_2_seq_num\"",
+                "ALTER TABLE \"public\".\"orders\" ALTER COLUMN \"seq_num\" SET NOT NULL",
+                "ALTER TABLE \"public\".\"orders\" ALTER COLUMN \"seq_num\" ADD GENERATED ALWAYS AS IDENTITY",
+                "ALTER TABLE \"public\".\"orders\" DROP CONSTRAINT \"orders_user_id_fkey\"",
+                "ALTER TABLE \"public\".\"orders\" ADD CONSTRAINT \"orders_user_id_fkey\" FOREIGN KEY (\"user_id\") REFERENCES \"public\".\"users\" (\"id\") ON DELETE CASCADE ON UPDATE NO ACTION",
+                "ALTER TABLE \"public\".\"orders\" DROP CONSTRAINT \"orders_pkey\"",
+                "ALTER TABLE \"public\".\"orders\" ADD CONSTRAINT \"orders_pkey\" PRIMARY KEY (\"id\")",
+                "ALTER TABLE \"public\".\"orders\" DROP COLUMN \"__dbased_mv_0_user_id\"",
+                "ALTER TABLE \"public\".\"orders\" DROP COLUMN \"__dbased_mv_1_id\"",
+                "ALTER TABLE \"public\".\"orders\" DROP COLUMN \"__dbased_mv_2_seq_num\"",
+                "CREATE INDEX \"idx_orders_user\" ON \"public\".\"orders\" USING btree (\"user_id\")",
+                "COMMIT"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_pg_dml_and_relation_formatting() {
+        let pk = PrimaryKeyValue {
+            columns: vec![("id".to_string(), "42".to_string())],
+        };
+        let empty_upd = RowUpdate {
+            pk: pk.clone(),
+            changes: vec![],
+        };
+        assert_eq!(
+            PostgresDriver::format_update_row_stmt("orders", &empty_upd).unwrap(),
+            None
+        );
+
+        let upd = RowUpdate {
+            pk: pk.clone(),
+            changes: vec![
+                ("notes".to_string(), DbValue::Text("o'reilly".to_string())),
+                ("deleted_at".to_string(), DbValue::Null),
+            ],
+        };
+        assert_eq!(
+            PostgresDriver::format_update_row_stmt("orders", &upd)
+                .unwrap()
+                .unwrap(),
+            "UPDATE \"public\".\"orders\" SET \"notes\" = 'o''reilly', \"deleted_at\" = NULL WHERE \"id\"::text = '42'"
+        );
+
+        assert_eq!(
+            PostgresDriver::format_insert_row_stmt("orders", &[]),
+            "INSERT INTO \"public\".\"orders\" DEFAULT VALUES"
+        );
+        assert_eq!(
+            PostgresDriver::format_insert_row_stmt(
+                "orders",
+                &[
+                    ("name".to_string(), DbValue::Text("alice".to_string())),
+                    ("deleted_at".to_string(), DbValue::Null),
+                ]
+            ),
+            "INSERT INTO \"public\".\"orders\" (\"name\", \"deleted_at\") VALUES ('alice', NULL)"
+        );
+
+        assert_eq!(
+            PostgresDriver::format_delete_row_stmt("orders", &pk).unwrap(),
+            "DELETE FROM \"public\".\"orders\" WHERE \"id\"::text = '42'"
+        );
+
+        let named_fk = NewForeignKey {
+            constraint_name: "fk_orders_user".to_string(),
+            column_name: "user_id".to_string(),
+            referenced_table: "users".to_string(),
+            referenced_column: "id".to_string(),
+            on_delete: "CASCADE".to_string(),
+            on_update: "RESTRICT".to_string(),
+        };
+        assert_eq!(
+            PostgresDriver::format_add_relation_stmt("orders", &named_fk),
+            "ALTER TABLE \"public\".\"orders\" ADD CONSTRAINT \"fk_orders_user\" FOREIGN KEY (\"user_id\") REFERENCES \"public\".\"users\" (\"id\") ON DELETE CASCADE ON UPDATE RESTRICT"
+        );
+        assert_eq!(
+            PostgresDriver::format_drop_relation_stmt("orders", "fk_orders_user"),
+            "ALTER TABLE \"public\".\"orders\" DROP CONSTRAINT \"fk_orders_user\""
+        );
+    }
+
+    #[test]
+    fn test_pg_table_content_query_formatting() {
+        let cols = vec![
+            ColumnInfo {
+                ordinal: 1,
+                name: "id".to_string(),
+                data_type: "integer".to_string(),
+                is_nullable: false,
+                is_primary_key: true,
+                default_value: None,
+                extra: String::new(),
+            },
+            ColumnInfo {
+                ordinal: 2,
+                name: "email".to_string(),
+                data_type: "text".to_string(),
+                is_nullable: false,
+                is_primary_key: false,
+                default_value: None,
+                extra: String::new(),
+            },
+        ];
+
+        let q1 = ContentQuery {
+            limit: 100,
+            offset: 200,
+            sort_column: Some("email".to_string()),
+            sort_direction: SortDirection::Asc,
+            search_text: "o'reilly".to_string(),
+        };
+        let (count_sql, data_sql) = PostgresDriver::format_table_content_queries("users", &cols, &q1);
+        assert_eq!(
+            count_sql,
+            "SELECT COUNT(*) FROM \"public\".\"users\" WHERE (\"id\"::text ILIKE '%o''reilly%' OR \"email\"::text ILIKE '%o''reilly%')"
+        );
+        assert_eq!(
+            data_sql,
+            "SELECT * FROM \"public\".\"users\" WHERE (\"id\"::text ILIKE '%o''reilly%' OR \"email\"::text ILIKE '%o''reilly%') ORDER BY \"email\" ASC LIMIT 100 OFFSET 200"
+        );
+
+        let q2 = ContentQuery {
+            limit: 25,
+            offset: 0,
+            sort_column: Some("injected_col".to_string()),
+            sort_direction: SortDirection::Desc,
+            search_text: "where \"id\" = 1".to_string(),
+        };
+        let (count_sql2, data_sql2) =
+            PostgresDriver::format_table_content_queries("users", &cols, &q2);
+        assert_eq!(
+            count_sql2,
+            "SELECT COUNT(*) FROM \"public\".\"users\" WHERE \"id\" = 1"
+        );
+        assert_eq!(
+            data_sql2,
+            "SELECT * FROM \"public\".\"users\" WHERE \"id\" = 1 LIMIT 25 OFFSET 0"
+        );
+    }
 }
+
+
