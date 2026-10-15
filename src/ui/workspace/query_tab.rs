@@ -87,7 +87,6 @@ impl QueryTab {
             buffer.set_language(Some(&sql_lang));
         }
         buffer.set_highlight_syntax(true);
-        buffer.set_text("-- Write SQL here. In Vim normal mode: ':r' runs query, ':w' saves .sql file\nSELECT 1 AS status;\n");
 
         Self::apply_editor_style_scheme(&buffer);
         let style_mgr = adw::StyleManager::default();
