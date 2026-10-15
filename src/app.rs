@@ -7,13 +7,13 @@ const APP_ID: &str = "io.github.tsndr.dbased";
 
 const CUSTOM_CSS: &str = r#"
 .spreadsheet-grid {
-    border-top: 1px solid alpha(@borders, 0.7);
     border-left: 1px solid alpha(@borders, 0.7);
 }
 
 .spreadsheet-header-box {
+    border-top: 1px solid alpha(@borders, 0.7);
     border-bottom: 2px solid alpha(@borders, 0.9);
-    background: alpha(@headerbar_bg_color, 0.65);
+    background: mix(@window_bg_color, @headerbar_bg_color, 0.65);
 }
 
 .spreadsheet-header-btn {
@@ -25,9 +25,10 @@ const CUSTOM_CSS: &str = r#"
 }
 
 .spreadsheet-header-cell {
+    border-top: 1px solid alpha(@borders, 0.7);
     border-right: 1px solid alpha(@borders, 0.8);
     border-bottom: 2px solid alpha(@borders, 0.9);
-    background: alpha(@headerbar_bg_color, 0.65);
+    background: mix(@window_bg_color, @headerbar_bg_color, 0.65);
     padding: 6px 10px;
 }
 
