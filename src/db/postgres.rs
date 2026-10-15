@@ -155,12 +155,24 @@ impl PostgresDriver {
         }
     }
 
+    fn pg_enum_type_name(table: &str, col_name: &str) -> String {
+        format!("{}_{}_enum", table.trim(), col_name.trim())
+    }
+
     fn format_add_column_stmt(table: &str, spec: &ColumnSpec) -> String {
         let fq_table = Self::qualified_table(table);
+        let enum_vals = parse_enum_data_type(&spec.data_type)
+            .and_then(|vals| format_sql_value_list(&vals));
+        let col_data_type = if enum_vals.is_some() {
+            quote_pg_ident(&Self::pg_enum_type_name(table, &spec.name))
+        } else {
+            spec.data_type.trim().to_string()
+        };
+
         let mut parts = vec![
             format!("ALTER TABLE {} ADD COLUMN", fq_table),
             quote_pg_ident(&spec.name),
-            spec.data_type.trim().to_string(),
+            col_data_type,
         ];
         let identity_gen = Self::parse_identity_generation(spec.extra.as_deref());
         if !spec.is_nullable || identity_gen.is_some() {
@@ -185,7 +197,16 @@ impl PostgresDriver {
         if spec.is_primary_key {
             parts.push("PRIMARY KEY".to_string());
         }
-        parts.join(" ")
+        let add_col_sql = parts.join(" ");
+        if let Some(vals_sql) = enum_vals {
+            let enum_type_ident = quote_pg_ident(&Self::pg_enum_type_name(table, &spec.name));
+            format!(
+                "DROP TYPE IF EXISTS {};\nCREATE TYPE {} AS ENUM ({});\n{}",
+                enum_type_ident, enum_type_ident, vals_sql, add_col_sql
+            )
+        } else {
+            add_col_sql
+        }
     }
 
     fn format_modify_column_stmt(
@@ -205,11 +226,41 @@ impl PostgresDriver {
             ));
         }
         let col_ident = quote_pg_ident(&spec.name);
-        let dt = spec.data_type.trim();
-        stmts.push(format!(
-            "ALTER TABLE {} ALTER COLUMN {} TYPE {} USING {}::{}",
-            fq_table, col_ident, dt, col_ident, dt
-        ));
+        let enum_vals = parse_enum_data_type(&spec.data_type)
+            .and_then(|vals| format_sql_value_list(&vals));
+        if let Some(vals_sql) = enum_vals {
+            let target_type_name = Self::pg_enum_type_name(table, &spec.name);
+            let target_type_ident = quote_pg_ident(&target_type_name);
+            let tmp_type_ident = quote_pg_ident(&format!("{}_new", target_type_name));
+            stmts.push(format!(
+                "ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT",
+                fq_table, col_ident
+            ));
+            stmts.push(format!("DROP TYPE IF EXISTS {}", tmp_type_ident));
+            stmts.push(format!(
+                "CREATE TYPE {} AS ENUM ({})",
+                tmp_type_ident, vals_sql
+            ));
+            stmts.push(format!(
+                "ALTER TABLE {} ALTER COLUMN {} TYPE {} USING {}::text::{}",
+                fq_table, col_ident, tmp_type_ident, col_ident, tmp_type_ident
+            ));
+            if old_name != spec.name {
+                let old_type_ident = quote_pg_ident(&Self::pg_enum_type_name(table, old_name));
+                stmts.push(format!("DROP TYPE IF EXISTS {}", old_type_ident));
+            }
+            stmts.push(format!("DROP TYPE IF EXISTS {}", target_type_ident));
+            stmts.push(format!(
+                "ALTER TYPE {} RENAME TO {}",
+                tmp_type_ident, target_type_ident
+            ));
+        } else {
+            let dt = spec.data_type.trim();
+            stmts.push(format!(
+                "ALTER TABLE {} ALTER COLUMN {} TYPE {} USING {}::{}",
+                fq_table, col_ident, dt, col_ident, dt
+            ));
+        }
         let old_id_gen = Self::parse_identity_generation(existing_identity);
         let new_id_gen = Self::parse_identity_generation(spec.extra.as_deref());
         if spec.is_nullable && new_id_gen.is_none() {
@@ -1929,6 +1980,41 @@ mod tests {
             "ALTER TABLE \"public\".\"orders\" ALTER COLUMN \"id\" TYPE BIGINT USING \"id\"::BIGINT;\n\
              ALTER TABLE \"public\".\"orders\" ALTER COLUMN \"id\" SET NOT NULL;\n\
              ALTER TABLE \"public\".\"orders\" ALTER COLUMN \"id\" DROP IDENTITY IF EXISTS"
+        );
+
+        let add_enum = ColumnSpec {
+            name: "status".to_string(),
+            data_type: "ENUM('pending', 'shipped', 'delivered')".to_string(),
+            is_nullable: false,
+            default_value: Some("pending".to_string()),
+            extra: None,
+            is_primary_key: false,
+        };
+        assert_eq!(
+            PostgresDriver::format_add_column_stmt("orders", &add_enum),
+            "DROP TYPE IF EXISTS \"orders_status_enum\";\n\
+             CREATE TYPE \"orders_status_enum\" AS ENUM ('pending', 'shipped', 'delivered');\n\
+             ALTER TABLE \"public\".\"orders\" ADD COLUMN \"status\" \"orders_status_enum\" NOT NULL DEFAULT 'pending'"
+        );
+
+        let mod_enum = ColumnSpec {
+            name: "status".to_string(),
+            data_type: "ENUM('pending', 'processing', 'shipped')".to_string(),
+            is_nullable: true,
+            default_value: Some("processing".to_string()),
+            extra: None,
+            is_primary_key: false,
+        };
+        assert_eq!(
+            PostgresDriver::format_modify_column_stmt("orders", "status", None, &mod_enum),
+            "ALTER TABLE \"public\".\"orders\" ALTER COLUMN \"status\" DROP DEFAULT;\n\
+             DROP TYPE IF EXISTS \"orders_status_enum_new\";\n\
+             CREATE TYPE \"orders_status_enum_new\" AS ENUM ('pending', 'processing', 'shipped');\n\
+             ALTER TABLE \"public\".\"orders\" ALTER COLUMN \"status\" TYPE \"orders_status_enum_new\" USING \"status\"::text::\"orders_status_enum_new\";\n\
+             DROP TYPE IF EXISTS \"orders_status_enum\";\n\
+             ALTER TYPE \"orders_status_enum_new\" RENAME TO \"orders_status_enum\";\n\
+             ALTER TABLE \"public\".\"orders\" ALTER COLUMN \"status\" DROP NOT NULL;\n\
+             ALTER TABLE \"public\".\"orders\" ALTER COLUMN \"status\" SET DEFAULT 'processing'"
         );
     }
 

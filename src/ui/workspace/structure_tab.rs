@@ -1,6 +1,7 @@
 use crate::config::bookmarks::DbEngine;
 use crate::db::models::{
     BackendCommand, ColumnAlterOp, ColumnInfo, ColumnSpec, IndexAlterOp, IndexInfo, IndexSpec,
+    format_sql_value_list, parse_enum_data_type, parse_sql_value_list, strip_pg_enum_default_cast,
 };
 use crate::ui::workspace::{
     CELL_EXTRA_PADDING, DEFAULT_DATA_COL_WIDTH, HEADER_EXTRA_PADDING, MIN_COLUMN_WIDTH,
@@ -92,6 +93,7 @@ const POSTGRES_COLUMN_DATA_TYPES: &[&str] = &[
     "UUID",
     "JSON",
     "JSONB",
+    "ENUM",
     "BIT",
     "VARBIT",
     "BYTEA",
@@ -1258,6 +1260,81 @@ impl StructureTab {
         }
     }
 
+    pub fn validate_value_list(values: &[String]) -> (bool, Vec<Option<&'static str>>) {
+        if values.is_empty() {
+            return (false, Vec::new());
+        }
+        let mut errors = Vec::with_capacity(values.len());
+        for (i, val) in values.iter().enumerate() {
+            let trimmed = val.trim();
+            if trimmed.is_empty() {
+                errors.push(Some("Value cannot be empty"));
+            } else if values
+                .iter()
+                .enumerate()
+                .any(|(j, other)| j != i && other.trim() == trimmed)
+            {
+                errors.push(Some("Duplicate value"));
+            } else {
+                errors.push(None);
+            }
+        }
+        let is_valid = errors.iter().all(|e| e.is_none());
+        (is_valid, errors)
+    }
+
+    pub fn build_enum_default_options(
+        values: &[String],
+        is_nullable: bool,
+        current_default: Option<&str>,
+    ) -> (Vec<String>, usize) {
+        let mut options = vec!["None".to_string()];
+        if is_nullable {
+            options.push("NULL".to_string());
+        }
+        let reserved_count = options.len();
+        for val in values {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() && !options[reserved_count..].iter().any(|existing| existing == trimmed) {
+                options.push(trimmed.to_string());
+            }
+        }
+
+        let selected_idx = match current_default.map(strip_pg_enum_default_cast) {
+            Some(cleaned) if !cleaned.is_empty() && !cleaned.eq_ignore_ascii_case("None") => {
+                if is_nullable && cleaned.eq_ignore_ascii_case("NULL") {
+                    1
+                } else {
+                    options
+                        .iter()
+                        .enumerate()
+                        .skip(reserved_count)
+                        .find(|(_, opt)| *opt == &cleaned)
+                        .map(|(idx, _)| idx)
+                        .unwrap_or(0)
+                }
+            }
+            _ => 0,
+        };
+
+        (options, selected_idx)
+    }
+
+    pub fn resolve_enum_default_selection(
+        selected_idx: usize,
+        values: &[String],
+        is_nullable: bool,
+    ) -> Option<String> {
+        let (options, _) = Self::build_enum_default_options(values, is_nullable, None);
+        if selected_idx == 0 {
+            None
+        } else if is_nullable && selected_idx == 1 {
+            Some("NULL".to_string())
+        } else {
+            options.get(selected_idx).cloned()
+        }
+    }
+
     fn build_column_type_options(
         engine: DbEngine,
         existing: Option<&ColumnInfo>,
@@ -1268,7 +1345,13 @@ impl StructureTab {
             .collect();
 
         let (init_type_idx, parsed_param, is_unsigned) = if let Some(col) = existing {
-            let raw_dt = col.data_type.trim();
+            let raw_dt = if parse_enum_data_type(&col.data_type).is_none()
+                && parse_enum_data_type(&col.extra).is_some()
+            {
+                col.extra.trim()
+            } else {
+                col.data_type.trim()
+            };
             let (canonical, param, parsed_unsigned) = Self::parse_column_data_type(raw_dt);
             let effective_unsigned =
                 parsed_unsigned && Self::type_supports_unsigned(engine, canonical);
@@ -1366,18 +1449,20 @@ impl StructureTab {
         let engine = *self.current_engine.borrow();
         let dialog = adw::Dialog::builder()
             .title(if is_edit { "Edit Column" } else { "Add Column" })
-            .content_width(420)
+            .content_width(460)
             .build();
 
         let toolbar_view = adw::ToolbarView::new();
         let header = adw::HeaderBar::new();
         toolbar_view.add_top_bar(&header);
 
+        let content_box = gtk::Box::new(gtk::Orientation::Vertical, 16);
+        content_box.set_margin_top(12);
+        content_box.set_margin_bottom(12);
+        content_box.set_margin_start(12);
+        content_box.set_margin_end(12);
+
         let prefs_group = adw::PreferencesGroup::new();
-        prefs_group.set_margin_top(12);
-        prefs_group.set_margin_bottom(12);
-        prefs_group.set_margin_start(12);
-        prefs_group.set_margin_end(12);
 
         let name_row = adw::EntryRow::builder()
             .title("Column Name")
@@ -1402,13 +1487,18 @@ impl StructureTab {
 
         let init_selected_type = &type_options[init_type_idx];
         let init_spec = Self::param_spec_for_type(init_selected_type);
+        let init_is_value_list = init_spec.map(|s| s.kind) == Some(TypeParamKind::ValueList);
+        let init_is_enum = init_selected_type.eq_ignore_ascii_case("ENUM");
+
         let (init_param_visible, init_param_title, init_param_text) = match init_spec {
-            Some(spec) => (
+            Some(spec) if spec.kind != TypeParamKind::ValueList => (
                 true,
                 spec.title,
-                parsed_param.unwrap_or_else(|| spec.default_value.to_string()),
+                parsed_param
+                    .clone()
+                    .unwrap_or_else(|| spec.default_value.to_string()),
             ),
-            None => (false, "Length", String::new()),
+            _ => (false, "Length", String::new()),
         };
 
         let type_param_row = adw::EntryRow::builder()
@@ -1417,6 +1507,16 @@ impl StructureTab {
             .visible(init_param_visible)
             .build();
 
+        let init_values: Vec<String> = if init_is_value_list {
+            parsed_param
+                .as_deref()
+                .and_then(parse_sql_value_list)
+                .unwrap_or_else(|| vec!["value1".to_string(), "value2".to_string()])
+        } else {
+            vec!["value1".to_string(), "value2".to_string()]
+        };
+        let value_list: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(init_values));
+
         let init_supports_unsigned = Self::type_supports_unsigned(engine, init_selected_type);
         let unsigned_row = adw::SwitchRow::builder()
             .title("Unsigned")
@@ -1424,57 +1524,67 @@ impl StructureTab {
             .visible(init_supports_unsigned)
             .build();
 
-        let last_auto_param = Rc::new(RefCell::new(init_param_text));
-        let last_param_kind = Rc::new(RefCell::new(init_spec.map(|s| s.kind)));
-        {
-            let type_model = type_model.clone();
-            let type_param_row = type_param_row.clone();
-            let unsigned_row = unsigned_row.clone();
-            let last_auto_param = last_auto_param.clone();
-            let last_param_kind = last_param_kind.clone();
-            type_row.connect_selected_notify(move |combo| {
-                let selected_type = type_model
-                    .string(combo.selected())
-                    .map(|s| s.to_string())
-                    .unwrap_or_default();
-                if let Some(spec) = Self::param_spec_for_type(&selected_type) {
-                    type_param_row.set_title(spec.title);
-                    let cur_text = type_param_row.text().trim().to_string();
-                    let prev_auto = last_auto_param.borrow().clone();
-                    let prev_kind = *last_param_kind.borrow();
-                    if cur_text == prev_auto || prev_kind != Some(spec.kind) {
-                        type_param_row.set_text(spec.default_value);
-                        *last_auto_param.borrow_mut() = spec.default_value.to_string();
-                    }
-                    *last_param_kind.borrow_mut() = Some(spec.kind);
-                    type_param_row.set_visible(true);
-                } else {
-                    *last_param_kind.borrow_mut() = None;
-                    type_param_row.set_visible(false);
-                }
-
-                let supports_unsigned = Self::type_supports_unsigned(engine, &selected_type);
-                unsigned_row.set_visible(supports_unsigned);
-                if !supports_unsigned {
-                    unsigned_row.set_active(false);
-                }
-            });
-        }
-
         let nullable_row = adw::SwitchRow::builder()
             .title("Nullable")
             .active(existing.as_ref().map(|c| c.is_nullable).unwrap_or(true))
             .build();
 
+        let init_default_raw = existing
+            .as_ref()
+            .and_then(|c| c.default_value.as_deref())
+            .unwrap_or("");
+        let init_default_cleaned = strip_pg_enum_default_cast(init_default_raw);
+
         let default_row = adw::EntryRow::builder()
             .title("Default Value (leave empty for none)")
-            .text(
-                existing
-                    .as_ref()
-                    .and_then(|c| c.default_value.as_deref())
-                    .unwrap_or(""),
-            )
+            .text(if init_is_enum {
+                &init_default_cleaned
+            } else {
+                init_default_raw
+            })
+            .visible(!init_is_enum)
             .build();
+
+        let selected_enum_default: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(
+            if init_default_cleaned.is_empty() {
+                None
+            } else {
+                Some(init_default_cleaned)
+            },
+        ));
+        let updating_enum_default = Rc::new(RefCell::new(false));
+
+        let (init_enum_def_opts, init_enum_def_idx) = Self::build_enum_default_options(
+            &value_list.borrow(),
+            nullable_row.is_active(),
+            selected_enum_default.borrow().as_deref(),
+        );
+        let init_enum_def_refs: Vec<&str> = init_enum_def_opts.iter().map(|s| s.as_str()).collect();
+        let enum_default_model = gtk::StringList::new(&init_enum_def_refs);
+        let enum_default_row = adw::ComboRow::builder()
+            .title("Default Value")
+            .model(&enum_default_model)
+            .selected(init_enum_def_idx as u32)
+            .visible(init_is_enum)
+            .build();
+
+        {
+            let selected_enum_default = selected_enum_default.clone();
+            let updating_enum_default = updating_enum_default.clone();
+            let value_list = value_list.clone();
+            let nullable_row = nullable_row.clone();
+            enum_default_row.connect_selected_notify(move |combo| {
+                if *updating_enum_default.borrow() {
+                    return;
+                }
+                let resolved = Self::resolve_enum_default_selection(
+                    combo.selected() as usize,
+                    &value_list.borrow(),
+                    nullable_row.is_active(),
+                );
+                *selected_enum_default.borrow_mut() = resolved;
+            });
+        }
 
         let (extra_options, init_extra_idx) =
             Self::build_column_extra_options(engine, existing.as_ref());
@@ -1485,6 +1595,469 @@ impl StructureTab {
             .model(&extra_model)
             .selected(init_extra_idx as u32)
             .build();
+
+        let pk_row = adw::SwitchRow::builder()
+            .title("Primary Key")
+            .active(existing.as_ref().map(|c| c.is_primary_key).unwrap_or(false))
+            .visible(!is_edit)
+            .build();
+
+        prefs_group.add(&name_row);
+        prefs_group.add(&type_row);
+        prefs_group.add(&type_param_row);
+        prefs_group.add(&unsigned_row);
+        prefs_group.add(&nullable_row);
+        prefs_group.add(&default_row);
+        prefs_group.add(&enum_default_row);
+        prefs_group.add(&extra_row);
+        prefs_group.add(&pk_row);
+        content_box.append(&prefs_group);
+
+        // ==========================================
+        // Allowed Values Group (ENUM / SET)
+        // ==========================================
+        let values_group = adw::PreferencesGroup::builder()
+            .title("Allowed Values")
+            .description("Enter plain values without quotes; drag to reorder")
+            .visible(init_is_value_list)
+            .build();
+
+        let add_val_btn_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        add_val_btn_box.append(&gtk::Image::from_icon_name("list-add-symbolic"));
+        add_val_btn_box.append(&gtk::Label::new(Some("Add Value")));
+        let add_value_btn = gtk::Button::builder()
+            .child(&add_val_btn_box)
+            .valign(gtk::Align::Center)
+            .tooltip_text("Add another allowed value")
+            .build();
+        add_value_btn.add_css_class("flat");
+        values_group.set_header_suffix(Some(&add_value_btn));
+
+        let values_list = gtk::ListBox::new();
+        values_list.add_css_class("boxed-list");
+        values_list.set_selection_mode(gtk::SelectionMode::None);
+        values_group.add(&values_list);
+        content_box.append(&values_group);
+
+        let btn_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        btn_box.set_halign(gtk::Align::End);
+        btn_box.set_margin_top(4);
+
+        let cancel_btn = gtk::Button::with_label("Cancel");
+        let save_btn = gtk::Button::with_label(if is_edit { "Apply Changes" } else { "Add Column" });
+        save_btn.add_css_class("suggested-action");
+
+        btn_box.append(&cancel_btn);
+        btn_box.append(&save_btn);
+        content_box.append(&btn_box);
+
+        let row_entries: Rc<RefCell<Vec<gtk::Entry>>> = Rc::new(RefCell::new(Vec::new()));
+        let dragged_val_idx: Rc<RefCell<Option<usize>>> = Rc::new(RefCell::new(None));
+
+        let refresh_validation_and_defaults: Rc<dyn Fn()> = {
+            let name_row = name_row.clone();
+            let type_row = type_row.clone();
+            let type_model = type_model.clone();
+            let type_param_row = type_param_row.clone();
+            let value_list = value_list.clone();
+            let row_entries = row_entries.clone();
+            let values_group = values_group.clone();
+            let nullable_row = nullable_row.clone();
+            let enum_default_row = enum_default_row.clone();
+            let selected_enum_default = selected_enum_default.clone();
+            let updating_enum_default = updating_enum_default.clone();
+            let save_btn = save_btn.clone();
+
+            Rc::new(move || {
+                let col_name_ok = !name_row.text().trim().is_empty();
+                let selected_type = type_model
+                    .string(type_row.selected())
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                let spec_opt = Self::param_spec_for_type(&selected_type);
+                let is_value_list = spec_opt.map(|s| s.kind) == Some(TypeParamKind::ValueList);
+                let is_enum = selected_type.eq_ignore_ascii_case("ENUM");
+
+                let type_valid = if is_value_list {
+                    let vals = value_list.borrow();
+                    let (valid, errs) = Self::validate_value_list(&vals);
+                    let entries = row_entries.borrow();
+                    let mut first_err: Option<&'static str> = None;
+                    for (idx, entry) in entries.iter().enumerate() {
+                        if let Some(Some(err_msg)) = errs.get(idx) {
+                            entry.add_css_class("error");
+                            entry.set_tooltip_text(Some(err_msg));
+                            if first_err.is_none() {
+                                first_err = Some(err_msg);
+                            }
+                        } else {
+                            entry.remove_css_class("error");
+                            entry.set_tooltip_text(None);
+                        }
+                    }
+                    if let Some(err_msg) = first_err {
+                        values_group.set_description(Some(err_msg));
+                    } else {
+                        values_group.set_description(Some(
+                            "Enter plain values without quotes; drag to reorder",
+                        ));
+                    }
+                    valid
+                } else if let Some(spec) = spec_opt {
+                    !spec.required || !type_param_row.text().trim().is_empty()
+                } else {
+                    true
+                };
+
+                if is_enum {
+                    *updating_enum_default.borrow_mut() = true;
+                    let (opts, sel_idx) = Self::build_enum_default_options(
+                        &value_list.borrow(),
+                        nullable_row.is_active(),
+                        selected_enum_default.borrow().as_deref(),
+                    );
+                    let opt_refs: Vec<&str> = opts.iter().map(|s| s.as_str()).collect();
+                    let new_model = gtk::StringList::new(&opt_refs);
+                    enum_default_row.set_model(Some(&new_model));
+                    enum_default_row.set_selected(sel_idx as u32);
+                    *selected_enum_default.borrow_mut() = Self::resolve_enum_default_selection(
+                        sel_idx,
+                        &value_list.borrow(),
+                        nullable_row.is_active(),
+                    );
+                    *updating_enum_default.borrow_mut() = false;
+                }
+
+                save_btn.set_sensitive(col_name_ok && type_valid);
+            })
+        };
+
+        type RebuildFn = Rc<dyn Fn(Option<usize>)>;
+        let rebuild_holder: Rc<RefCell<Option<RebuildFn>>> = Rc::new(RefCell::new(None));
+        {
+            let values_list = values_list.clone();
+            let value_list = value_list.clone();
+            let row_entries = row_entries.clone();
+            let dragged_val_idx = dragged_val_idx.clone();
+            let selected_enum_default = selected_enum_default.clone();
+            let refresh_validation_and_defaults = refresh_validation_and_defaults.clone();
+            let rebuild_holder_inner = rebuild_holder.clone();
+
+            let rebuild_fn: RebuildFn = Rc::new(move |focus_idx: Option<usize>| {
+                while let Some(child) = values_list.first_child() {
+                    values_list.remove(&child);
+                }
+                row_entries.borrow_mut().clear();
+
+                let vals_snapshot = value_list.borrow().clone();
+                let total = vals_snapshot.len();
+
+                for (idx, val) in vals_snapshot.into_iter().enumerate() {
+                    let list_row = gtk::ListBoxRow::builder()
+                        .activatable(false)
+                        .selectable(false)
+                        .build();
+
+                    let row_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+                    row_box.set_margin_top(6);
+                    row_box.set_margin_bottom(6);
+                    row_box.set_margin_start(10);
+                    row_box.set_margin_end(8);
+
+                    let handle_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+                    handle_box.set_valign(gtk::Align::Center);
+                    handle_box.set_cursor_from_name(Some("grab"));
+                    handle_box.set_tooltip_text(Some("Drag to reorder value"));
+
+                    let drag_icon = gtk::Image::from_icon_name("list-drag-handle-symbolic");
+                    drag_icon.add_css_class("structure-drag-handle");
+
+                    let order_lbl = gtk::Label::new(Some(&format!("#{}", idx + 1)));
+                    order_lbl.add_css_class("monospace");
+                    order_lbl.add_css_class("accent");
+                    order_lbl.add_css_class("caption-heading");
+                    order_lbl.set_valign(gtk::Align::Center);
+                    order_lbl.set_width_chars(3);
+                    order_lbl.set_xalign(0.0);
+
+                    handle_box.append(&drag_icon);
+                    handle_box.append(&order_lbl);
+
+                    let entry = gtk::Entry::builder()
+                        .text(&val)
+                        .placeholder_text("Value")
+                        .hexpand(true)
+                        .valign(gtk::Align::Center)
+                        .build();
+
+                    let remove_btn = gtk::Button::from_icon_name("user-trash-symbolic");
+                    remove_btn.add_css_class("flat");
+                    remove_btn.set_valign(gtk::Align::Center);
+                    remove_btn.set_tooltip_text(Some("Remove value"));
+                    remove_btn.set_sensitive(total > 1);
+
+                    row_box.append(&handle_box);
+                    row_box.append(&entry);
+                    row_box.append(&remove_btn);
+                    list_row.set_child(Some(&row_box));
+                    values_list.append(&list_row);
+
+                    // DragSource on handle_box so text selection inside gtk::Entry works normally
+                    {
+                        let drag_source = gtk::DragSource::builder()
+                            .actions(gtk::gdk::DragAction::MOVE)
+                            .build();
+
+                        let dragged_prepare = dragged_val_idx.clone();
+                        drag_source.connect_prepare(move |_, _, _| {
+                            *dragged_prepare.borrow_mut() = Some(idx);
+                            Some(gtk::gdk::ContentProvider::for_value(&(idx as u32).to_value()))
+                        });
+
+                        let row_begin = list_row.clone();
+                        drag_source.connect_drag_begin(move |source, _| {
+                            row_begin.add_css_class("structure-row-dragging");
+                            let paintable = gtk::WidgetPaintable::new(Some(&row_begin));
+                            source.set_icon(Some(&paintable), 16, 16);
+                        });
+
+                        let row_end = list_row.clone();
+                        let dragged_end = dragged_val_idx.clone();
+                        drag_source.connect_drag_end(move |_, _, _| {
+                            row_end.remove_css_class("structure-row-dragging");
+                            *dragged_end.borrow_mut() = None;
+                        });
+
+                        handle_box.add_controller(drag_source);
+                    }
+
+                    // DropTarget on list_row to accept dropped enum values
+                    {
+                        let drop_target = gtk::DropTarget::new(
+                            gtk::glib::types::Type::U32,
+                            gtk::gdk::DragAction::MOVE,
+                        );
+
+                        let row_enter = list_row.clone();
+                        let dragged_enter = dragged_val_idx.clone();
+                        drop_target.connect_enter(move |_, _, _| {
+                            if let Some(from) = *dragged_enter.borrow() {
+                                if from > idx {
+                                    row_enter.add_css_class("structure-drop-above");
+                                    row_enter.remove_css_class("structure-drop-below");
+                                } else if from < idx {
+                                    row_enter.add_css_class("structure-drop-below");
+                                    row_enter.remove_css_class("structure-drop-above");
+                                }
+                            }
+                            gtk::gdk::DragAction::MOVE
+                        });
+
+                        let row_leave = list_row.clone();
+                        drop_target.connect_leave(move |_| {
+                            row_leave.remove_css_class("structure-drop-above");
+                            row_leave.remove_css_class("structure-drop-below");
+                        });
+
+                        let row_drop = list_row.clone();
+                        let value_list = value_list.clone();
+                        let rebuild_holder_inner = rebuild_holder_inner.clone();
+                        drop_target.connect_drop(move |_, val, _, _| {
+                            row_drop.remove_css_class("structure-drop-above");
+                            row_drop.remove_css_class("structure-drop-below");
+                            if let Ok(from_u32) = val.get::<u32>() {
+                                let from_idx = from_u32 as usize;
+                                let mut vals = value_list.borrow_mut();
+                                if from_idx < vals.len() && idx < vals.len() && from_idx != idx {
+                                    let moved = vals.remove(from_idx);
+                                    vals.insert(idx, moved);
+                                    drop(vals);
+                                    if let Some(rebuild) = rebuild_holder_inner.borrow().as_ref() {
+                                        rebuild(Some(idx));
+                                    }
+                                    return true;
+                                }
+                            }
+                            false
+                        });
+
+                        list_row.add_controller(drop_target);
+                    }
+
+                    {
+                        let value_list = value_list.clone();
+                        let selected_enum_default = selected_enum_default.clone();
+                        let refresh_validation_and_defaults =
+                            refresh_validation_and_defaults.clone();
+                        entry.connect_changed(move |ent| {
+                            let new_text = ent.text().to_string();
+                            let prev_trimmed = {
+                                let mut vals = value_list.borrow_mut();
+                                let prev = vals.get(idx).map(|s| s.trim().to_string());
+                                if let Some(slot) = vals.get_mut(idx) {
+                                    *slot = new_text.clone();
+                                }
+                                prev
+                            };
+                            if let Some(prev) = prev_trimmed {
+                                let mut sel_def = selected_enum_default.borrow_mut();
+                                if !prev.is_empty() && sel_def.as_deref() == Some(prev.as_str()) {
+                                    let next_trimmed = new_text.trim();
+                                    if next_trimmed.is_empty() {
+                                        *sel_def = None;
+                                    } else {
+                                        *sel_def = Some(next_trimmed.to_string());
+                                    }
+                                }
+                            }
+                            refresh_validation_and_defaults();
+                        });
+                    }
+
+                    {
+                        let value_list = value_list.clone();
+                        let row_entries = row_entries.clone();
+                        let rebuild_holder_inner = rebuild_holder_inner.clone();
+                        entry.connect_activate(move |_| {
+                            let next_idx = idx + 1;
+                            let cur_len = value_list.borrow().len();
+                            if next_idx < cur_len {
+                                if let Some(next_entry) = row_entries.borrow().get(next_idx) {
+                                    next_entry.grab_focus();
+                                }
+                            } else {
+                                value_list.borrow_mut().push(String::new());
+                                if let Some(rebuild) = rebuild_holder_inner.borrow().as_ref() {
+                                    rebuild(Some(next_idx));
+                                }
+                            }
+                        });
+                    }
+
+                    {
+                        let value_list = value_list.clone();
+                        let rebuild_holder_inner = rebuild_holder_inner.clone();
+                        remove_btn.connect_clicked(move |_| {
+                            let mut vals = value_list.borrow_mut();
+                            if vals.len() > 1 && idx < vals.len() {
+                                vals.remove(idx);
+                                let next_focus = idx.min(vals.len().saturating_sub(1));
+                                drop(vals);
+                                if let Some(rebuild) = rebuild_holder_inner.borrow().as_ref() {
+                                    rebuild(Some(next_focus));
+                                }
+                            }
+                        });
+                    }
+
+                    row_entries.borrow_mut().push(entry);
+                }
+
+                refresh_validation_and_defaults();
+
+                if let Some(target_idx) = focus_idx {
+                    if let Some(ent) = row_entries.borrow().get(target_idx) {
+                        ent.grab_focus();
+                    }
+                }
+            });
+
+            *rebuild_holder.borrow_mut() = Some(rebuild_fn);
+        }
+
+        if let Some(rebuild) = rebuild_holder.borrow().as_ref() {
+            rebuild(None);
+        }
+
+        {
+            let value_list = value_list.clone();
+            let rebuild_holder = rebuild_holder.clone();
+            add_value_btn.connect_clicked(move |_| {
+                let new_idx = {
+                    let mut vals = value_list.borrow_mut();
+                    vals.push(String::new());
+                    vals.len() - 1
+                };
+                if let Some(rebuild) = rebuild_holder.borrow().as_ref() {
+                    rebuild(Some(new_idx));
+                }
+            });
+        }
+
+        {
+            let refresh_validation_and_defaults = refresh_validation_and_defaults.clone();
+            name_row.connect_changed(move |_| {
+                refresh_validation_and_defaults();
+            });
+        }
+
+        {
+            let refresh_validation_and_defaults = refresh_validation_and_defaults.clone();
+            type_param_row.connect_changed(move |_| {
+                refresh_validation_and_defaults();
+            });
+        }
+
+        {
+            let refresh_validation_and_defaults = refresh_validation_and_defaults.clone();
+            nullable_row.connect_active_notify(move |_| {
+                refresh_validation_and_defaults();
+            });
+        }
+
+        let last_auto_param = Rc::new(RefCell::new(init_param_text));
+        let last_param_kind = Rc::new(RefCell::new(init_spec.map(|s| s.kind)));
+        {
+            let type_model = type_model.clone();
+            let type_param_row = type_param_row.clone();
+            let values_group = values_group.clone();
+            let default_row = default_row.clone();
+            let enum_default_row = enum_default_row.clone();
+            let unsigned_row = unsigned_row.clone();
+            let last_auto_param = last_auto_param.clone();
+            let last_param_kind = last_param_kind.clone();
+            let refresh_validation_and_defaults = refresh_validation_and_defaults.clone();
+            type_row.connect_selected_notify(move |combo| {
+                let selected_type = type_model
+                    .string(combo.selected())
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                let is_enum = selected_type.eq_ignore_ascii_case("ENUM");
+                default_row.set_visible(!is_enum);
+                enum_default_row.set_visible(is_enum);
+
+                if let Some(spec) = Self::param_spec_for_type(&selected_type) {
+                    if spec.kind == TypeParamKind::ValueList {
+                        type_param_row.set_visible(false);
+                        values_group.set_visible(true);
+                    } else {
+                        values_group.set_visible(false);
+                        type_param_row.set_title(spec.title);
+                        let cur_text = type_param_row.text().trim().to_string();
+                        let prev_auto = last_auto_param.borrow().clone();
+                        let prev_kind = *last_param_kind.borrow();
+                        if cur_text == prev_auto || prev_kind != Some(spec.kind) {
+                            type_param_row.set_text(spec.default_value);
+                            *last_auto_param.borrow_mut() = spec.default_value.to_string();
+                        }
+                        type_param_row.set_visible(true);
+                    }
+                    *last_param_kind.borrow_mut() = Some(spec.kind);
+                } else {
+                    *last_param_kind.borrow_mut() = None;
+                    type_param_row.set_visible(false);
+                    values_group.set_visible(false);
+                }
+
+                let supports_unsigned = Self::type_supports_unsigned(engine, &selected_type);
+                unsigned_row.set_visible(supports_unsigned);
+                if !supports_unsigned {
+                    unsigned_row.set_active(false);
+                }
+
+                refresh_validation_and_defaults();
+            });
+        }
 
         {
             let extra_model = extra_model.clone();
@@ -1501,34 +2074,15 @@ impl StructureTab {
             });
         }
 
-        let pk_row = adw::SwitchRow::builder()
-            .title("Primary Key")
-            .active(existing.as_ref().map(|c| c.is_primary_key).unwrap_or(false))
-            .visible(!is_edit)
+        let dialog_scroll = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::Automatic)
+            .propagate_natural_height(true)
+            .max_content_height(560)
+            .child(&content_box)
             .build();
 
-        prefs_group.add(&name_row);
-        prefs_group.add(&type_row);
-        prefs_group.add(&type_param_row);
-        prefs_group.add(&unsigned_row);
-        prefs_group.add(&nullable_row);
-        prefs_group.add(&default_row);
-        prefs_group.add(&extra_row);
-        prefs_group.add(&pk_row);
-
-        let btn_box = gtk::Box::new(gtk::Orientation::Horizontal, 8);
-        btn_box.set_halign(gtk::Align::End);
-        btn_box.set_margin_top(12);
-
-        let cancel_btn = gtk::Button::with_label("Cancel");
-        let save_btn = gtk::Button::with_label(if is_edit { "Apply Changes" } else { "Add Column" });
-        save_btn.add_css_class("suggested-action");
-
-        btn_box.append(&cancel_btn);
-        btn_box.append(&save_btn);
-        prefs_group.add(&btn_box);
-
-        toolbar_view.set_content(Some(&prefs_group));
+        toolbar_view.set_content(Some(&dialog_scroll));
         dialog.set_child(Some(&toolbar_view));
 
         {
@@ -1546,7 +2100,10 @@ impl StructureTab {
             let old_col = existing;
             let type_model = type_model.clone();
             let type_param_row = type_param_row.clone();
+            let value_list = value_list.clone();
             let unsigned_row = unsigned_row.clone();
+            let default_row = default_row.clone();
+            let enum_default_row = enum_default_row.clone();
             let extra_model = extra_model.clone();
             let extra_row = extra_row.clone();
             save_btn.connect_clicked(move |_| {
@@ -1557,17 +2114,51 @@ impl StructureTab {
                     .unwrap_or_default();
                 let is_unsigned = unsigned_row.is_active()
                     && Self::type_supports_unsigned(engine, &selected_type);
-                let Some(data_type) = Self::format_column_data_type(
-                    &selected_type,
-                    &type_param_row.text(),
-                    is_unsigned,
-                ) else {
+                let is_value_list = Self::param_spec_for_type(&selected_type)
+                    .map(|s| s.kind == TypeParamKind::ValueList)
+                    .unwrap_or(false);
+
+                let raw_param = if is_value_list {
+                    let vals = value_list.borrow();
+                    let (valid, _) = Self::validate_value_list(&vals);
+                    if !valid {
+                        return;
+                    }
+                    let trimmed_vals: Vec<String> =
+                        vals.iter().map(|v| v.trim().to_string()).collect();
+                    let Some(formatted) = format_sql_value_list(&trimmed_vals) else {
+                        return;
+                    };
+                    formatted
+                } else {
+                    type_param_row.text().to_string()
+                };
+
+                let Some(data_type) =
+                    Self::format_column_data_type(&selected_type, &raw_param, is_unsigned)
+                else {
                     return;
                 };
                 if col_name.is_empty() || data_type.is_empty() {
                     return;
                 }
-                let def_txt = default_row.text().trim().to_string();
+
+                let is_nullable = nullable_row.is_active();
+                let default_value = if selected_type.eq_ignore_ascii_case("ENUM") {
+                    Self::resolve_enum_default_selection(
+                        enum_default_row.selected() as usize,
+                        &value_list.borrow(),
+                        is_nullable,
+                    )
+                } else {
+                    let def_txt = default_row.text().trim().to_string();
+                    if def_txt.is_empty() {
+                        None
+                    } else {
+                        Some(def_txt)
+                    }
+                };
+
                 let selected_extra = extra_model
                     .string(extra_row.selected())
                     .map(|s| s.to_string())
@@ -1575,12 +2166,8 @@ impl StructureTab {
                 let spec = ColumnSpec {
                     name: col_name,
                     data_type,
-                    is_nullable: nullable_row.is_active(),
-                    default_value: if def_txt.is_empty() {
-                        None
-                    } else {
-                        Some(def_txt)
-                    },
+                    is_nullable,
+                    default_value,
                     extra: Self::format_column_extra(&selected_extra),
                     is_primary_key: pk_row.is_active(),
                 };
@@ -2531,7 +3118,6 @@ mod tests {
             "TINYINT",
             "DOUBLE",
             "DATETIME",
-            "ENUM",
             "SET",
             "BINARY",
             "VARBINARY",
@@ -2549,6 +3135,8 @@ mod tests {
                 unsupported
             );
         }
+        assert!(mysql_types.contains(&"ENUM"));
+        assert!(pg_types.contains(&"ENUM"));
 
         // Every listed type for both engines must produce a valid SQL type with its default parameter
         for &engine in &[DbEngine::MySql, DbEngine::Postgres] {
@@ -2612,6 +3200,27 @@ mod tests {
         assert_eq!(pg_edit_opts[pg_edit_idx], "JSONB");
         assert!(!pg_edit_unsigned);
 
+        let existing_pg_enum_col = ColumnInfo {
+            ordinal: 3,
+            name: "role".to_string(),
+            data_type: "user_role".to_string(),
+            is_nullable: false,
+            is_primary_key: false,
+            default_value: Some("'admin'::user_role".to_string()),
+            extra: "enum('admin','member','guest')".to_string(),
+        };
+        let (pg_enum_opts, pg_enum_idx, pg_enum_param, pg_enum_unsigned) =
+            StructureTab::build_column_type_options(
+                DbEngine::Postgres,
+                Some(&existing_pg_enum_col),
+            );
+        assert_eq!(pg_enum_opts[pg_enum_idx], "ENUM");
+        assert_eq!(
+            pg_enum_param,
+            Some("'admin','member','guest'".to_string())
+        );
+        assert!(!pg_enum_unsigned);
+
         let existing_mysql_unsigned_col = ColumnInfo {
             ordinal: 1,
             name: "id".to_string(),
@@ -2647,6 +3256,91 @@ mod tests {
         assert_eq!(dec_opts[dec_idx], "DECIMAL");
         assert_eq!(dec_param, Some("10,2".to_string()));
         assert!(dec_unsigned);
+    }
+
+    #[test]
+    fn test_enum_value_list_validation_and_default_options() {
+        let (empty_ok, empty_errs) = StructureTab::validate_value_list(&[]);
+        assert!(!empty_ok);
+        assert!(empty_errs.is_empty());
+
+        let vals_with_blank = vec!["active".to_string(), "  ".to_string()];
+        let (blank_ok, blank_errs) = StructureTab::validate_value_list(&vals_with_blank);
+        assert!(!blank_ok);
+        assert_eq!(blank_errs, vec![None, Some("Value cannot be empty")]);
+
+        let vals_with_dup = vec![
+            "active".to_string(),
+            "pending".to_string(),
+            " active ".to_string(),
+        ];
+        let (dup_ok, dup_errs) = StructureTab::validate_value_list(&vals_with_dup);
+        assert!(!dup_ok);
+        assert_eq!(
+            dup_errs,
+            vec![Some("Duplicate value"), None, Some("Duplicate value")]
+        );
+
+        let valid_vals = vec![
+            "active".to_string(),
+            "it's pending".to_string(),
+            "a, b".to_string(),
+        ];
+        let (valid_ok, valid_errs) = StructureTab::validate_value_list(&valid_vals);
+        assert!(valid_ok);
+        assert_eq!(valid_errs, vec![None, None, None]);
+
+        let formatted = format_sql_value_list(&valid_vals).unwrap();
+        assert_eq!(formatted, "'active', 'it''s pending', 'a, b'");
+        assert_eq!(parse_sql_value_list(&formatted), Some(valid_vals.clone()));
+
+        // Nullable ENUM default options
+        let (null_opts, null_sel) = StructureTab::build_enum_default_options(
+            &valid_vals,
+            true,
+            Some("'it''s pending'::status_enum"),
+        );
+        assert_eq!(
+            null_opts,
+            vec![
+                "None".to_string(),
+                "NULL".to_string(),
+                "active".to_string(),
+                "it's pending".to_string(),
+                "a, b".to_string(),
+            ]
+        );
+        assert_eq!(null_sel, 3);
+        assert_eq!(
+            StructureTab::resolve_enum_default_selection(null_sel, &valid_vals, true),
+            Some("it's pending".to_string())
+        );
+        assert_eq!(
+            StructureTab::resolve_enum_default_selection(1, &valid_vals, true),
+            Some("NULL".to_string())
+        );
+        assert_eq!(
+            StructureTab::resolve_enum_default_selection(0, &valid_vals, true),
+            None
+        );
+
+        // Non-nullable ENUM default options (no NULL option)
+        let (non_null_opts, non_null_sel) =
+            StructureTab::build_enum_default_options(&valid_vals, false, Some("a, b"));
+        assert_eq!(
+            non_null_opts,
+            vec![
+                "None".to_string(),
+                "active".to_string(),
+                "it's pending".to_string(),
+                "a, b".to_string(),
+            ]
+        );
+        assert_eq!(non_null_sel, 3);
+        assert_eq!(
+            StructureTab::resolve_enum_default_selection(non_null_sel, &valid_vals, false),
+            Some("a, b".to_string())
+        );
     }
 
     #[test]

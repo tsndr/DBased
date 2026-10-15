@@ -37,7 +37,17 @@ pub fn parse_enum_data_type(data_type: &str) -> Option<Vec<String>> {
         return None;
     }
     let (inner, _) = rest.rsplit_once(')')?;
-    let inner = inner.trim();
+    parse_sql_value_list(inner)
+}
+
+/// Parses a comma-separated list of SQL string literals (e.g. `'active', 'pending'`,
+/// `'it''s', 'a, b'`) into raw unquoted values in declaration order.
+pub fn parse_sql_value_list(raw: &str) -> Option<Vec<String>> {
+    let inner = raw
+        .trim()
+        .trim_start_matches('(')
+        .trim_end_matches(')')
+        .trim();
     if inner.is_empty() {
         return None;
     }
@@ -102,6 +112,37 @@ pub fn parse_enum_data_type(data_type: &str) -> Option<Vec<String>> {
         None
     } else {
         Some(values)
+    }
+}
+
+/// Formats a slice of plain string values into a comma-separated list of SQL string
+/// literals (e.g. `["active", "it's"]` -> `"'active', 'it''s'"`).
+/// Returns `None` if `values` is empty or any entry is blank.
+pub fn format_sql_value_list(values: &[String]) -> Option<String> {
+    if values.is_empty() || values.iter().any(|v| v.trim().is_empty()) {
+        return None;
+    }
+    let formatted: Vec<String> = values
+        .iter()
+        .map(|v| format!("'{}'", v.replace('\'', "''")))
+        .collect();
+    Some(formatted.join(", "))
+}
+
+/// Strips optional PostgreSQL typecasts (e.g. `'admin'::user_role`) and outer single quotes
+/// from an enum column's default value expression.
+pub fn strip_pg_enum_default_cast(default_val: &str) -> String {
+    let base = default_val
+        .split("::")
+        .next()
+        .unwrap_or(default_val)
+        .trim();
+    if base.len() >= 2 && base.starts_with('\'') && base.ends_with('\'') {
+        base[1..base.len() - 1]
+            .replace("''", "'")
+            .replace("\\'", "'")
+    } else {
+        base.to_string()
     }
 }
 
