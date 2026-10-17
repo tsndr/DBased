@@ -161,17 +161,6 @@ kbd,
   filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.4));
 }
 
-.brand-version {
-  font-family: var(--font-mono);
-  font-size: 0.72rem;
-  font-weight: 600;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--accent-blue-subtle);
-  color: var(--accent-blue-bright);
-  border: 1px solid rgba(98, 160, 234, 0.28);
-}
-
 .header-nav {
   display: flex;
   align-items: center;
@@ -1320,10 +1309,6 @@ kbd {
   .brand-icon {
     width: 30px;
     height: 30px;
-  }
-
-  .brand-version {
-    display: none;
   }
 
   .header-actions {
