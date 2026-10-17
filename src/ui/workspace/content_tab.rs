@@ -1614,6 +1614,9 @@ impl ContentTab {
                         let col_name = col_info.name.clone();
                         let orig = original_val.clone();
                         let cell_box_ref = cell_box.clone();
+                        if row_editable {
+                            attach_blur_null_handler(&entry, col_info.is_nullable);
+                        }
                         entry.connect_changed(move |e| {
                             let new_val = DbValue::from_editor_str(&e.text());
                             if let (Some(btn), Some(fk)) = (&ref_btn_opt, &fk_opt) {
@@ -2172,6 +2175,7 @@ impl ContentTab {
                 } else {
                     let tab_clone = self.clone();
                     let col_name = col_info.name.clone();
+                    attach_blur_null_handler(&entry, col_info.is_nullable);
                     entry.connect_changed(move |e| {
                         let new_val = DbValue::from_editor_str(&e.text());
                         if let (Some(btn), Some(fk)) = (&ref_btn_opt, &fk_opt) {
@@ -2360,6 +2364,31 @@ impl ContentTab {
             }
         });
     }
+}
+
+/// When a cell entry loses focus with empty text, a nullable column reverts to SQL NULL.
+/// Returns the replacement entry text, or `None` if the text should stay as-is.
+pub fn blur_normalized_text(text: &str, is_nullable: bool) -> Option<&'static str> {
+    if is_nullable && text.is_empty() {
+        Some("NULL")
+    } else {
+        None
+    }
+}
+
+/// Attach a focus-leave handler that reverts an emptied nullable cell to NULL.
+/// Setting the entry text re-triggers its `changed` handler, which records the value.
+fn attach_blur_null_handler(entry: &gtk::Entry, is_nullable: bool) {
+    let focus = gtk::EventControllerFocus::new();
+    let entry_weak = entry.downgrade();
+    focus.connect_leave(move |_| {
+        if let Some(e) = entry_weak.upgrade()
+            && let Some(txt) = blur_normalized_text(&e.text(), is_nullable)
+        {
+            e.set_text(txt);
+        }
+    });
+    entry.add_controller(focus);
 }
 
 pub fn build_enum_dropdown_options(
@@ -2860,6 +2889,20 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
+
+    #[test]
+    fn empty_nullable_cell_becomes_null_on_blur() {
+        assert_eq!(blur_normalized_text("", true), Some("NULL"));
+    }
+
+    #[test]
+    fn empty_non_nullable_cell_is_untouched_on_blur() {
+        assert_eq!(blur_normalized_text("", false), None);
+    }
+
+    #[test]
+    fn non_empty_nullable_cell_is_untouched_on_blur() {
+        assert_eq!(blur_normalized_text("abc", true), None);
+        assert_eq!(blur_normalized_text(" ", true), None);
+    }
 }
-
-
