@@ -206,6 +206,8 @@ impl BookmarkStore {
     }
 
     pub fn save_all(&self, bookmarks: &[ConnectionBookmark]) -> Result<()> {
+        use std::io::Write;
+
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("Failed to create config directory {:?}", parent))?;
@@ -215,13 +217,22 @@ impl BookmarkStore {
         };
         let serialized = toml::to_string_pretty(&file)
             .context("Failed to serialize bookmarks to TOML")?;
-        fs::write(&self.path, serialized)
+        let tmp_path = self.path.with_extension(format!("tmp.{}", Uuid::new_v4()));
+        {
+            let mut f = fs::File::create(&tmp_path)
+                .with_context(|| format!("Failed to create temporary file {:?}", tmp_path))?;
+            f.write_all(serialized.as_bytes())
+                .with_context(|| format!("Failed to write temporary file {:?}", tmp_path))?;
+            f.sync_all()
+                .with_context(|| format!("Failed to sync temporary file {:?}", tmp_path))?;
+        }
+        fs::rename(&tmp_path, &self.path)
             .with_context(|| format!("Failed to write bookmarks to {:?}", self.path))?;
         Ok(())
     }
 
     pub fn upsert(&self, bookmark: ConnectionBookmark) -> Result<Vec<ConnectionBookmark>> {
-        let mut all = self.load_all().unwrap_or_default();
+        let mut all = self.load_all()?;
         if let Some(existing) = all.iter_mut().find(|b| b.id == bookmark.id) {
             *existing = bookmark;
         } else {
@@ -232,7 +243,7 @@ impl BookmarkStore {
     }
 
     pub fn delete(&self, id: &str) -> Result<Vec<ConnectionBookmark>> {
-        let mut all = self.load_all().unwrap_or_default();
+        let mut all = self.load_all()?;
         all.retain(|b| b.id != id);
         self.save_all(&all)?;
         Ok(all)
@@ -295,6 +306,30 @@ mod tests {
 
         let after_del = store.delete(&bm.id).unwrap();
         assert!(after_del.is_empty());
+        let _ = fs::remove_file(temp_path);
+    }
+
+    #[test]
+    fn test_upsert_and_delete_do_not_wipe_corrupt_bookmarks_file() {
+        let temp_path = env::temp_dir().join(format!("dbased_corrupt_bm_{}.toml", Uuid::new_v4()));
+        let store = BookmarkStore::with_path(temp_path.clone());
+
+        let corrupt_content = "invalid [[[ toml content that must not be silently wiped";
+        fs::write(&temp_path, corrupt_content).unwrap();
+
+        let bm = ConnectionBookmark::default();
+        assert!(
+            store.upsert(bm.clone()).is_err(),
+            "upsert should return Err when existing bookmarks.toml is corrupt"
+        );
+        assert_eq!(fs::read_to_string(&temp_path).unwrap(), corrupt_content);
+
+        assert!(
+            store.delete(&bm.id).is_err(),
+            "delete should return Err when existing bookmarks.toml is corrupt"
+        );
+        assert_eq!(fs::read_to_string(&temp_path).unwrap(), corrupt_content);
+
         let _ = fs::remove_file(temp_path);
     }
 }

@@ -308,6 +308,11 @@ impl UsersTab {
         *self.available_databases.borrow_mut() = databases;
     }
 
+    pub fn clear(&self) {
+        self.available_databases.borrow_mut().clear();
+        self.set_users_and_permissions(Vec::new(), None, Vec::new());
+    }
+
     pub fn request_refresh(&self) {
         let selected_user = self.selected_user.borrow().clone();
         let _ = self
@@ -358,8 +363,8 @@ impl UsersTab {
     }
 
     fn update_selected_user_rows(&self) {
-        let users = self.users.borrow();
-        let selected_user = self.selected_user.borrow();
+        let users = self.users.borrow().clone();
+        let selected_user = self.selected_user.borrow().clone();
         let num_cols = USERS_HEADERS.len() as i32;
 
         for (row_idx, user) in users.iter().enumerate() {
@@ -1636,241 +1641,239 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore]
     fn verify_live_gtk_users_grid_alignment() {
-        use crate::ui::workspace::WorkspaceContent;
-        use adw::prelude::*;
+        crate::ui::test_util::run_gtk_test(|| {
+            use crate::ui::workspace::WorkspaceContent;
+            use adw::prelude::*;
 
-        let _ = adw::init();
-        sourceview5::init();
-        crate::app::load_css();
+            let (cmd_tx, _cmd_rx) = async_channel::unbounded();
+            let workspace_content = WorkspaceContent::new(cmd_tx, |_| {});
+            workspace_content.stack.set_visible_child_name("users");
 
-        let (cmd_tx, _cmd_rx) = async_channel::unbounded();
-        let workspace_content = WorkspaceContent::new(cmd_tx, |_| {});
-        workspace_content.stack.set_visible_child_name("users");
+            let users = vec![
+                DbUser {
+                    username: "root".into(),
+                    host: Some("localhost".into()),
+                    global_privileges: vec!["SELECT".into(), "INSERT".into(), "SUPER".into()],
+                    has_grant_option: true,
+                },
+                DbUser {
+                    username: "app_service".into(),
+                    host: Some("%".into()),
+                    global_privileges: Vec::new(),
+                    has_grant_option: false,
+                },
+            ];
 
-        let users = vec![
-            DbUser {
-                username: "root".into(),
-                host: Some("localhost".into()),
-                global_privileges: vec!["SELECT".into(), "INSERT".into(), "SUPER".into()],
-                has_grant_option: true,
-            },
-            DbUser {
+            let perms = vec![DatabasePermission {
                 username: "app_service".into(),
                 host: Some("%".into()),
-                global_privileges: Vec::new(),
+                database: "commerce_prod".into(),
+                privileges: vec!["SELECT".into(), "INSERT".into(), "UPDATE".into()],
                 has_grant_option: false,
-            },
-        ];
+            }];
 
-        let perms = vec![DatabasePermission {
-            username: "app_service".into(),
-            host: Some("%".into()),
-            database: "commerce_prod".into(),
-            privileges: vec!["SELECT".into(), "INSERT".into(), "UPDATE".into()],
-            has_grant_option: false,
-        }];
+            workspace_content.users_tab.set_connection_context(
+                DbEngine::MySql,
+                vec!["commerce_prod".into(), "analytics".into()],
+            );
+            workspace_content.users_tab.set_users_and_permissions(
+                users,
+                Some(("app_service".into(), Some("%".into()))),
+                perms.clone(),
+            );
 
-        workspace_content.users_tab.set_connection_context(
-            DbEngine::MySql,
-            vec!["commerce_prod".into(), "analytics".into()],
-        );
-        workspace_content.users_tab.set_users_and_permissions(
-            users,
-            Some(("app_service".into(), Some("%".into()))),
-            perms.clone(),
-        );
+            let win = adw::Window::builder()
+                .title("DBased")
+                .default_width(1440)
+                .default_height(920)
+                .content(&workspace_content.page)
+                .build();
+            win.present();
 
-        let win = adw::Window::builder()
-            .title("DBased")
-            .default_width(1440)
-            .default_height(920)
-            .content(&workspace_content.page)
-            .build();
-        win.present();
-
-        let ctx = gtk::glib::MainContext::default();
-        for _ in 0..60 {
-            while ctx.iteration(false) {}
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-
-        let grid = &workspace_content.users_tab.grid;
-        assert!(grid.has_css_class("spreadsheet-grid"));
-        for col in 0..=USERS_HEADERS.len() as i32 {
-            let hdr = grid.child_at(col, 0).expect("users header cell");
-            assert!(hdr.has_css_class("spreadsheet-header-box"));
-            let hdr_bounds = hdr.compute_bounds(grid).expect("hdr bounds");
-            for row in 1..=2 {
-                let cell = grid.child_at(col, row).expect("users row cell");
-                let cell_bounds = cell.compute_bounds(grid).expect("cell bounds");
-                assert_eq!(hdr_bounds.x(), cell_bounds.x());
-                assert_eq!(hdr_bounds.width(), cell_bounds.width());
+            let ctx = gtk::glib::MainContext::default();
+            for _ in 0..60 {
+                while ctx.iteration(false) {}
+                std::thread::sleep(std::time::Duration::from_millis(10));
             }
-        }
 
-        // Verify UsersTab preserves vertical scroll position when selecting a user row
-        let many_users: Vec<DbUser> = (0..25)
-            .map(|i| DbUser {
-                username: format!("user_{:02}", i),
-                host: Some("%".into()),
-                global_privileges: if i == 0 {
-                    vec!["SELECT".into(), "INSERT".into(), "SUPER".into()]
-                } else {
-                    vec!["SELECT".into()]
-                },
-                has_grant_option: i == 0,
-            })
-            .collect();
-        workspace_content.users_tab.set_users_and_permissions(
-            many_users.clone(),
-            Some(("user_00".into(), Some("%".into()))),
-            perms.clone(),
-        );
-        for _ in 0..30 {
-            while ctx.iteration(false) {}
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
+            let grid = &workspace_content.users_tab.grid;
+            assert!(grid.has_css_class("spreadsheet-grid"));
+            for col in 0..=USERS_HEADERS.len() as i32 {
+                let hdr = grid.child_at(col, 0).expect("users header cell");
+                assert!(hdr.has_css_class("spreadsheet-header-box"));
+                let hdr_bounds = hdr.compute_bounds(grid).expect("hdr bounds");
+                for row in 1..=2 {
+                    let cell = grid.child_at(col, row).expect("users row cell");
+                    let cell_bounds = cell.compute_bounds(grid).expect("cell bounds");
+                    assert_eq!(hdr_bounds.x(), cell_bounds.x());
+                    assert_eq!(hdr_bounds.width(), cell_bounds.width());
+                }
+            }
 
-        let users_vadj = workspace_content.users_tab.scroll.vadjustment();
-        users_vadj.set_value(280.0);
-        for _ in 0..20 {
-            while ctx.iteration(false) {}
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        assert_eq!(users_vadj.value().round() as i32, 280);
+            // Verify UsersTab preserves vertical scroll position when selecting a user row
+            let many_users: Vec<DbUser> = (0..25)
+                .map(|i| DbUser {
+                    username: format!("user_{:02}", i),
+                    host: Some("%".into()),
+                    global_privileges: if i == 0 {
+                        vec!["SELECT".into(), "INSERT".into(), "SUPER".into()]
+                    } else {
+                        vec!["SELECT".into()]
+                    },
+                    has_grant_option: i == 0,
+                })
+                .collect();
+            workspace_content.users_tab.set_users_and_permissions(
+                many_users.clone(),
+                Some(("user_00".into(), Some("%".into()))),
+                perms.clone(),
+            );
+            for _ in 0..30 {
+                while ctx.iteration(false) {}
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
 
-        // Select row 20 ("user_19") and verify vertical scroll stays at 280
-        workspace_content.users_tab.set_user_db_permissions(
-            "user_19",
-            Some("%".into()),
-            perms.clone(),
-        );
-        for _ in 0..40 {
-            while ctx.iteration(false) {}
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        assert_eq!(users_vadj.value().round() as i32, 280);
-        assert!(
-            workspace_content
-                .users_tab
-                .grid
-                .child_at(1, 20)
-                .expect("row 20 username cell")
-                .has_css_class("user-row-selected")
-        );
-        assert!(
-            !workspace_content
-                .users_tab
-                .grid
-                .child_at(1, 1)
-                .expect("row 1 username cell")
-                .has_css_class("user-row-selected")
-        );
+            let users_vadj = workspace_content.users_tab.scroll.vadjustment();
+            users_vadj.set_value(280.0);
+            for _ in 0..20 {
+                while ctx.iteration(false) {}
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert_eq!(users_vadj.value().round() as i32, 280);
 
-        // Refresh full users list and verify vertical scroll still stays at 280
-        workspace_content.users_tab.set_users_and_permissions(
-            many_users,
-            Some(("user_19".into(), Some("%".into()))),
-            perms,
-        );
-        for _ in 0..40 {
-            while ctx.iteration(false) {}
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        assert_eq!(users_vadj.value().round() as i32, 280);
+            // Select row 20 ("user_19") and verify vertical scroll stays at 280
+            workspace_content.users_tab.set_user_db_permissions(
+                "user_19",
+                Some("%".into()),
+                perms.clone(),
+            );
+            for _ in 0..40 {
+                while ctx.iteration(false) {}
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert_eq!(users_vadj.value().round() as i32, 280);
+            assert!(
+                workspace_content
+                    .users_tab
+                    .grid
+                    .child_at(1, 20)
+                    .expect("row 20 username cell")
+                    .has_css_class("user-row-selected")
+            );
+            assert!(
+                !workspace_content
+                    .users_tab
+                    .grid
+                    .child_at(1, 1)
+                    .expect("row 1 username cell")
+                    .has_css_class("user-row-selected")
+            );
 
-        // Verify ContentTab preserves horizontal scroll when clicking a far-right column header to sort
-        workspace_content.stack.set_visible_child_name("content");
-        let cols: Vec<crate::db::models::ColumnInfo> = (0..15)
-            .map(|i| crate::db::models::ColumnInfo {
-                ordinal: (i + 1) as u32,
-                name: format!("column_header_number_{}", i),
-                data_type: "varchar(255)".into(),
-                is_nullable: true,
-                is_primary_key: i == 0,
-                default_value: None,
-                extra: String::new(),
-            })
-            .collect();
-        let rows: Vec<crate::db::models::TableRowData> = (0..5)
-            .map(|r| crate::db::models::TableRowData {
-                pk: Some(crate::db::models::PrimaryKeyValue {
-                    columns: vec![("column_header_number_0".into(), r.to_string())],
-                }),
-                values: (0..15)
-                    .map(|c| crate::db::models::DbValue::Text(format!("val_{}_{}", r, c)))
-                    .collect(),
-            })
-            .collect();
-        let page = crate::db::models::TablePage {
-            database: "commerce_prod".into(),
-            table: "orders".into(),
-            columns: cols,
-            rows,
-            total_rows: 5,
-            page_offset: 0,
-            page_limit: 100,
-        };
-        workspace_content.content_tab.set_page(page.clone());
-        for _ in 0..30 {
-            while ctx.iteration(false) {}
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
+            // Refresh full users list and verify vertical scroll still stays at 280
+            workspace_content.users_tab.set_users_and_permissions(
+                many_users,
+                Some(("user_19".into(), Some("%".into()))),
+                perms,
+            );
+            for _ in 0..40 {
+                while ctx.iteration(false) {}
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert_eq!(users_vadj.value().round() as i32, 280);
 
-        let content_paned = workspace_content
-            .content_tab
-            .root
-            .first_child()
-            .and_then(|w| w.next_sibling())
-            .and_then(|w| w.next_sibling())
-            .and_then(|w| w.next_sibling())
-            .and_then(|w| w.downcast::<gtk::Paned>().ok())
-            .expect("content_paned");
-        let content_scroll = content_paned
-            .start_child()
-            .and_then(|w| w.downcast::<gtk::ScrolledWindow>().ok())
-            .expect("content_scroll");
-        let content_viewport = content_scroll
-            .child()
-            .and_then(|w| w.downcast::<gtk::Viewport>().ok())
-            .expect("content_viewport");
-        let content_grid = content_viewport
-            .child()
-            .and_then(|w| w.downcast::<gtk::Grid>().ok())
-            .expect("content_grid");
+            // Verify ContentTab preserves horizontal scroll when clicking a far-right column header to sort
+            workspace_content.stack.set_visible_child_name("content");
+            let cols: Vec<crate::db::models::ColumnInfo> = (0..15)
+                .map(|i| crate::db::models::ColumnInfo {
+                    ordinal: (i + 1) as u32,
+                    name: format!("column_header_number_{}", i),
+                    data_type: "varchar(255)".into(),
+                    is_nullable: true,
+                    is_primary_key: i == 0,
+                    default_value: None,
+                    extra: String::new(),
+                })
+                .collect();
+            let rows: Vec<crate::db::models::TableRowData> = (0..5)
+                .map(|r| crate::db::models::TableRowData {
+                    pk: Some(crate::db::models::PrimaryKeyValue {
+                        columns: vec![("column_header_number_0".into(), r.to_string())],
+                    }),
+                    values: (0..15)
+                        .map(|c| crate::db::models::DbValue::Text(format!("val_{}_{}", r, c)))
+                        .collect(),
+                })
+                .collect();
+            let page = crate::db::models::TablePage {
+                database: "commerce_prod".into(),
+                table: "orders".into(),
+                columns: cols,
+                rows,
+                total_rows: 5,
+                page_offset: 0,
+                page_limit: 100,
+            };
+            workspace_content.content_tab.set_page(page.clone());
+            for _ in 0..30 {
+                while ctx.iteration(false) {}
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
 
-        let hadj = content_scroll.hadjustment();
-        hadj.set_value(800.0);
-        for _ in 0..20 {
-            while ctx.iteration(false) {}
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        assert_eq!(hadj.value().round() as i32, 800);
-
-        if let Some(hdr_box_14) = content_grid.child_at(15, 0) {
-            if let Some(hdr_btn_14) = hdr_box_14
+            let content_paned = workspace_content
+                .content_tab
+                .root
                 .first_child()
-                .and_then(|w| w.downcast::<gtk::Button>().ok())
-            {
-                hdr_btn_14.emit_clicked();
+                .and_then(|w| w.next_sibling())
+                .and_then(|w| w.next_sibling())
+                .and_then(|w| w.next_sibling())
+                .and_then(|w| w.downcast::<gtk::Paned>().ok())
+                .expect("content_paned");
+            let content_scroll = content_paned
+                .start_child()
+                .and_then(|w| w.downcast::<gtk::ScrolledWindow>().ok())
+                .expect("content_scroll");
+            let content_viewport = content_scroll
+                .child()
+                .and_then(|w| w.downcast::<gtk::Viewport>().ok())
+                .expect("content_viewport");
+            let content_grid = content_viewport
+                .child()
+                .and_then(|w| w.downcast::<gtk::Grid>().ok())
+                .expect("content_grid");
+
+            let hadj = content_scroll.hadjustment();
+            hadj.set_value(800.0);
+            for _ in 0..20 {
+                while ctx.iteration(false) {}
+                std::thread::sleep(std::time::Duration::from_millis(5));
             }
-        }
-        for _ in 0..10 {
-            while ctx.iteration(false) {}
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        assert_eq!(hadj.value().round() as i32, 800);
+            assert_eq!(hadj.value().round() as i32, 800);
 
-        workspace_content.content_tab.set_page(page);
-        for _ in 0..60 {
-            while ctx.iteration(false) {}
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
-        assert_eq!(hadj.value().round() as i32, 800);
+            if let Some(hdr_box_14) = content_grid.child_at(15, 0) {
+                if let Some(hdr_btn_14) = hdr_box_14
+                    .first_child()
+                    .and_then(|w| w.downcast::<gtk::Button>().ok())
+                {
+                    hdr_btn_14.emit_clicked();
+                }
+            }
+            for _ in 0..10 {
+                while ctx.iteration(false) {}
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert_eq!(hadj.value().round() as i32, 800);
 
-        win.close();
+            workspace_content.content_tab.set_page(page);
+            for _ in 0..60 {
+                while ctx.iteration(false) {}
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            assert_eq!(hadj.value().round() as i32, 800);
+
+            win.close();
+            while ctx.iteration(false) {}
+        });
     }
 }
 

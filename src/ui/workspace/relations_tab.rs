@@ -267,6 +267,24 @@ impl RelationsTab {
         self.render_grid();
     }
 
+    pub fn clear_table(&self) {
+        self.local_columns.borrow_mut().clear();
+        self.set_relations("", "", Vec::new());
+    }
+
+    pub fn clear(&self) {
+        self.all_tables.borrow_mut().clear();
+        self.clear_table();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn current_table_context(&self) -> (String, String) {
+        (
+            self.current_db.borrow().clone(),
+            self.current_table.borrow().clone(),
+        )
+    }
+
     fn render_grid(&self) {
         let saved_h = self.scroll.hadjustment().value();
         let saved_v = self.scroll.vadjustment().value();
@@ -650,75 +668,73 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore]
     fn verify_live_gtk_relations_grid_alignment() {
-        use crate::ui::workspace::WorkspaceContent;
-        use adw::prelude::*;
+        crate::ui::test_util::run_gtk_test(|| {
+            use crate::ui::workspace::WorkspaceContent;
+            use adw::prelude::*;
 
-        let _ = adw::init();
-        sourceview5::init();
-        crate::app::load_css();
+            let (cmd_tx, _cmd_rx) = async_channel::unbounded();
+            let workspace_content = WorkspaceContent::new(cmd_tx, |_| {});
+            workspace_content.stack.set_visible_child_name("relations");
 
-        let (cmd_tx, _cmd_rx) = async_channel::unbounded();
-        let workspace_content = WorkspaceContent::new(cmd_tx, |_| {});
-        workspace_content.stack.set_visible_child_name("relations");
+            let fks = vec![
+                ForeignKeyInfo {
+                    constraint_name: "fk_orders_customer_id".into(),
+                    column_name: "customer_id".into(),
+                    referenced_table: "customers".into(),
+                    referenced_column: "id".into(),
+                    update_rule: "CASCADE".into(),
+                    delete_rule: "RESTRICT".into(),
+                },
+                ForeignKeyInfo {
+                    constraint_name: "fk_orders_coupon_id".into(),
+                    column_name: "coupon_id".into(),
+                    referenced_table: "coupons".into(),
+                    referenced_column: "code".into(),
+                    update_rule: "CASCADE".into(),
+                    delete_rule: "SET NULL".into(),
+                },
+            ];
 
-        let fks = vec![
-            ForeignKeyInfo {
-                constraint_name: "fk_orders_customer_id".into(),
-                column_name: "customer_id".into(),
-                referenced_table: "customers".into(),
-                referenced_column: "id".into(),
-                update_rule: "CASCADE".into(),
-                delete_rule: "RESTRICT".into(),
-            },
-            ForeignKeyInfo {
-                constraint_name: "fk_orders_coupon_id".into(),
-                column_name: "coupon_id".into(),
-                referenced_table: "coupons".into(),
-                referenced_column: "code".into(),
-                update_rule: "CASCADE".into(),
-                delete_rule: "SET NULL".into(),
-            },
-        ];
+            workspace_content
+                .relations_tab
+                .set_relations("commerce_prod", "orders", fks);
 
-        workspace_content
-            .relations_tab
-            .set_relations("commerce_prod", "orders", fks);
+            let win = adw::Window::builder()
+                .title("DBased")
+                .default_width(1440)
+                .default_height(920)
+                .content(&workspace_content.page)
+                .build();
+            win.present();
 
-        let win = adw::Window::builder()
-            .title("DBased")
-            .default_width(1440)
-            .default_height(920)
-            .content(&workspace_content.page)
-            .build();
-        win.present();
-
-        let ctx = gtk::glib::MainContext::default();
-        for _ in 0..60 {
-            while ctx.iteration(false) {}
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-
-        let grid = &workspace_content.relations_tab.grid;
-        assert!(grid.has_css_class("spreadsheet-grid"));
-        for col in 0..=RELATIONS_HEADERS.len() as i32 {
-            let hdr = grid.child_at(col, 0).expect("relations header cell");
-            assert!(hdr.has_css_class("spreadsheet-header-box"));
-            let hdr_bounds = hdr.compute_bounds(grid).expect("hdr bounds");
-            for row in 1..=2 {
-                let cell = grid.child_at(col, row).expect("relations row cell");
-                if col == 0 {
-                    assert!(cell.has_css_class("spreadsheet-row-num"));
-                } else {
-                    assert!(cell.has_css_class("spreadsheet-cell"));
-                }
-                let cell_bounds = cell.compute_bounds(grid).expect("cell bounds");
-                assert_eq!(hdr_bounds.x(), cell_bounds.x());
-                assert_eq!(hdr_bounds.width(), cell_bounds.width());
+            let ctx = gtk::glib::MainContext::default();
+            for _ in 0..60 {
+                while ctx.iteration(false) {}
+                std::thread::sleep(std::time::Duration::from_millis(10));
             }
-        }
 
-        win.close();
+            let grid = &workspace_content.relations_tab.grid;
+            assert!(grid.has_css_class("spreadsheet-grid"));
+            for col in 0..=RELATIONS_HEADERS.len() as i32 {
+                let hdr = grid.child_at(col, 0).expect("relations header cell");
+                assert!(hdr.has_css_class("spreadsheet-header-box"));
+                let hdr_bounds = hdr.compute_bounds(grid).expect("hdr bounds");
+                for row in 1..=2 {
+                    let cell = grid.child_at(col, row).expect("relations row cell");
+                    if col == 0 {
+                        assert!(cell.has_css_class("spreadsheet-row-num"));
+                    } else {
+                        assert!(cell.has_css_class("spreadsheet-cell"));
+                    }
+                    let cell_bounds = cell.compute_bounds(grid).expect("cell bounds");
+                    assert_eq!(hdr_bounds.x(), cell_bounds.x());
+                    assert_eq!(hdr_bounds.width(), cell_bounds.width());
+                }
+            }
+
+            win.close();
+            while ctx.iteration(false) {}
+        });
     }
 }

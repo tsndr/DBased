@@ -404,6 +404,17 @@ impl QueryTab {
         *self.current_db.borrow_mut() = db_name.to_string();
     }
 
+    pub fn clear(&self) {
+        *self.current_db.borrow_mut() = String::new();
+        *self.last_result.borrow_mut() = None;
+        self.col_widths.borrow_mut().clear();
+        self.header_cells.borrow_mut().clear();
+        self.natural_col_widths.borrow_mut().clear();
+        clear_spreadsheet_grid(&self.results_grid);
+        self.results_status.set_text("Query Results");
+        self.export_menu_btn.set_sensitive(false);
+    }
+
     pub fn execute_current_query(&self) {
         let sql = if let Some((start, end)) = self.buffer.selection_bounds() {
             let sel = self.buffer.text(&start, &end, false).to_string();
@@ -922,193 +933,192 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
     fn verify_live_gtk_query_results_column_alignment() {
-        use crate::db::models::TableInfo;
-        use crate::ui::sidebar::WorkspaceSidebar;
-        use crate::ui::workspace::WorkspaceContent;
-        use adw::prelude::*;
+        crate::ui::test_util::run_gtk_test(|| {
+            use crate::db::models::TableInfo;
+            use crate::ui::sidebar::WorkspaceSidebar;
+            use crate::ui::workspace::WorkspaceContent;
+            use adw::prelude::*;
 
-        let _ = adw::init();
-        sourceview5::init();
-        crate::app::load_css();
-        adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
-        if let Some(settings) = gtk::Settings::default() {
-            settings.set_gtk_icon_theme_name(Some("Adwaita"));
-        }
+            adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
+            if let Some(settings) = gtk::Settings::default() {
+                settings.set_gtk_icon_theme_name(Some("Adwaita"));
+            }
 
-        let (cmd_tx, _cmd_rx) = async_channel::unbounded();
-        let sidebar = WorkspaceSidebar::new(cmd_tx.clone());
-        let workspace_content = WorkspaceContent::new(cmd_tx, |_| {});
+            let (cmd_tx, _cmd_rx) = async_channel::unbounded();
+            let sidebar = WorkspaceSidebar::new(cmd_tx.clone());
+            let workspace_content = WorkspaceContent::new(cmd_tx, |_| {});
 
-        let tables = vec![
-            TableInfo { name: "audit_logs".into(), is_view: false },
-            TableInfo { name: "coupons".into(), is_view: false },
-            TableInfo { name: "customers".into(), is_view: false },
-            TableInfo { name: "invoices".into(), is_view: false },
-            TableInfo { name: "order_items".into(), is_view: false },
-            TableInfo { name: "orders".into(), is_view: false },
-            TableInfo { name: "payments".into(), is_view: false },
-            TableInfo { name: "products".into(), is_view: false },
-            TableInfo { name: "shipments".into(), is_view: false },
-            TableInfo { name: "daily_revenue_summary".into(), is_view: true },
-            TableInfo { name: "vip_customer_ltv".into(), is_view: true },
-        ];
-        sidebar.set_connection_state(
-            "Production Store (SSH)",
-            crate::config::bookmarks::DbEngine::Postgres,
-            "PostgreSQL (via SSH)",
-            &["commerce_prod".to_string()],
-            Some("commerce_prod"),
-            tables,
-        );
-        sidebar.set_selected_table("orders");
-
-        let split = adw::NavigationSplitView::builder()
-            .sidebar(&sidebar.page)
-            .content(&workspace_content.page)
-            .min_sidebar_width(240.0)
-            .max_sidebar_width(320.0)
-            .build();
-
-        workspace_content.stack.set_visible_child_name("query");
-        workspace_content.query_tab.set_sql_text(
-            "-- Top customers by lifetime order volume (Vim mode: ':r' to run, ':w' to save)\n\
-             SELECT\n  \
-               c.email,\n  \
-               c.full_name,\n  \
-               c.country,\n  \
-               COUNT(o.id) AS total_orders,\n  \
-               SUM(o.total_eur) AS lifetime_revenue_eur,\n  \
-               MAX(o.created_at) AS last_order_at\n\
-             FROM customers c\n\
-             JOIN orders o ON o.customer_id = c.id\n\
-             WHERE o.status IN ('shipped', 'delivered')\n\
-             GROUP BY c.id, c.email, c.full_name, c.country\n\
-             ORDER BY lifetime_revenue_eur DESC\n\
-             LIMIT 6;\n",
-        );
-
-        let rs = RawQueryResultSet {
-            columns: vec![
-                "email".into(),
-                "full_name".into(),
-                "country".into(),
-                "total_orders".into(),
-                "lifetime_revenue_eur".into(),
-                "last_order_at".into(),
-            ],
-            rows: vec![
-                vec![
-                    DbValue::Text("elena.rostova@zurich-labs.ch".into()),
-                    DbValue::Text("Elena Rostova".into()),
-                    DbValue::Text("CH".into()),
-                    DbValue::Text("19".into()),
-                    DbValue::Text("14,820.50".into()),
-                    DbValue::Text("2026-10-14 10:12:04".into()),
-                ],
-                vec![
-                    DbValue::Text("clara.oswald@tardis.co.uk".into()),
-                    DbValue::Text("Clara Oswald".into()),
-                    DbValue::Text("DE".into()),
-                    DbValue::Text("14".into()),
-                    DbValue::Text("6,340.90".into()),
-                    DbValue::Text("2026-10-14 10:25:19".into()),
-                ],
-                vec![
-                    DbValue::Text("hannah.nielsen@windenergy.dk".into()),
-                    DbValue::Text("Hannah Nielsen".into()),
-                    DbValue::Text("AT".into()),
-                    DbValue::Text("11".into()),
-                    DbValue::Text("4,915.20".into()),
-                    DbValue::Text("2026-10-14 11:03:41".into()),
-                ],
-                vec![
-                    DbValue::Text("marcus.vance@cloudscale.io".into()),
-                    DbValue::Text("Marcus Vance".into()),
-                    DbValue::Text("DE".into()),
-                    DbValue::Text("9".into()),
-                    DbValue::Text("3,180.00".into()),
-                    DbValue::Text("2026-10-12 16:40:12".into()),
-                ],
-                vec![
-                    DbValue::Text("jonas.kahnwald@winden-power.de".into()),
-                    DbValue::Text("Jonas Kahnwald".into()),
-                    DbValue::Text("DE".into()),
-                    DbValue::Text("7".into()),
-                    DbValue::Text("2,410.75".into()),
-                    DbValue::Text("2026-10-10 14:05:55".into()),
-                ],
-                vec![
-                    DbValue::Text("lukas.weber@main-logistics.de".into()),
-                    DbValue::Text("Lukas Weber".into()),
-                    DbValue::Text("DE".into()),
-                    DbValue::Text("5".into()),
-                    DbValue::Text("1,690.40".into()),
-                    DbValue::Text("2026-10-08 09:18:30".into()),
-                ],
-            ],
-            execution_time_ms: 4,
-        };
-        workspace_content
-            .query_tab
-            .show_outcome(Ok(RawQueryOutcome::Rows(rs)));
-
-        let win = adw::Window::builder()
-            .title("DBased")
-            .default_width(1440)
-            .default_height(920)
-            .content(&split)
-            .build();
-        win.present();
-
-        let ctx = gtk::glib::MainContext::default();
-        for _ in 0..80 {
-            while ctx.iteration(false) {}
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-
-        let grid = &workspace_content.query_tab.results_grid;
-        for col in 0..=6 {
-            let hdr = grid.child_at(col, 0).expect("header widget");
-            let hdr_bounds = hdr.compute_bounds(grid).expect("hdr bounds");
-            assert!(
-                hdr_bounds.width() >= MIN_COLUMN_WIDTH as f32,
-                "col {} hdr_w={}",
-                col,
-                hdr_bounds.width()
+            let tables = vec![
+                TableInfo { name: "audit_logs".into(), is_view: false },
+                TableInfo { name: "coupons".into(), is_view: false },
+                TableInfo { name: "customers".into(), is_view: false },
+                TableInfo { name: "invoices".into(), is_view: false },
+                TableInfo { name: "order_items".into(), is_view: false },
+                TableInfo { name: "orders".into(), is_view: false },
+                TableInfo { name: "payments".into(), is_view: false },
+                TableInfo { name: "products".into(), is_view: false },
+                TableInfo { name: "shipments".into(), is_view: false },
+                TableInfo { name: "daily_revenue_summary".into(), is_view: true },
+                TableInfo { name: "vip_customer_ltv".into(), is_view: true },
+            ];
+            sidebar.set_connection_state(
+                "Production Store (SSH)",
+                crate::config::bookmarks::DbEngine::Postgres,
+                "PostgreSQL (via SSH)",
+                &["commerce_prod".to_string()],
+                Some("commerce_prod"),
+                tables,
             );
-            for row in 1..=6 {
-                let cell = grid.child_at(col, row).expect("cell widget");
-                let cell_bounds = cell.compute_bounds(grid).expect("cell bounds");
-                assert_eq!(
-                    hdr_bounds.x(),
-                    cell_bounds.x(),
-                    "Column {} header x ({}) != row {} cell x ({})",
+            sidebar.set_selected_table("orders");
+
+            let split = adw::NavigationSplitView::builder()
+                .sidebar(&sidebar.page)
+                .content(&workspace_content.page)
+                .min_sidebar_width(240.0)
+                .max_sidebar_width(320.0)
+                .build();
+
+            workspace_content.stack.set_visible_child_name("query");
+            workspace_content.query_tab.set_sql_text(
+                "-- Top customers by lifetime order volume (Vim mode: ':r' to run, ':w' to save)\n\
+                 SELECT\n  \
+                   c.email,\n  \
+                   c.full_name,\n  \
+                   c.country,\n  \
+                   COUNT(o.id) AS total_orders,\n  \
+                   SUM(o.total_eur) AS lifetime_revenue_eur,\n  \
+                   MAX(o.created_at) AS last_order_at\n\
+                 FROM customers c\n\
+                 JOIN orders o ON o.customer_id = c.id\n\
+                 WHERE o.status IN ('shipped', 'delivered')\n\
+                 GROUP BY c.id, c.email, c.full_name, c.country\n\
+                 ORDER BY lifetime_revenue_eur DESC\n\
+                 LIMIT 6;\n",
+            );
+
+            let rs = RawQueryResultSet {
+                columns: vec![
+                    "email".into(),
+                    "full_name".into(),
+                    "country".into(),
+                    "total_orders".into(),
+                    "lifetime_revenue_eur".into(),
+                    "last_order_at".into(),
+                ],
+                rows: vec![
+                    vec![
+                        DbValue::Text("elena.rostova@zurich-labs.ch".into()),
+                        DbValue::Text("Elena Rostova".into()),
+                        DbValue::Text("CH".into()),
+                        DbValue::Text("19".into()),
+                        DbValue::Text("14,820.50".into()),
+                        DbValue::Text("2026-10-14 10:12:04".into()),
+                    ],
+                    vec![
+                        DbValue::Text("clara.oswald@tardis.co.uk".into()),
+                        DbValue::Text("Clara Oswald".into()),
+                        DbValue::Text("DE".into()),
+                        DbValue::Text("14".into()),
+                        DbValue::Text("6,340.90".into()),
+                        DbValue::Text("2026-10-14 10:25:19".into()),
+                    ],
+                    vec![
+                        DbValue::Text("hannah.nielsen@windenergy.dk".into()),
+                        DbValue::Text("Hannah Nielsen".into()),
+                        DbValue::Text("AT".into()),
+                        DbValue::Text("11".into()),
+                        DbValue::Text("4,915.20".into()),
+                        DbValue::Text("2026-10-14 11:03:41".into()),
+                    ],
+                    vec![
+                        DbValue::Text("marcus.vance@cloudscale.io".into()),
+                        DbValue::Text("Marcus Vance".into()),
+                        DbValue::Text("DE".into()),
+                        DbValue::Text("9".into()),
+                        DbValue::Text("3,180.00".into()),
+                        DbValue::Text("2026-10-12 16:40:12".into()),
+                    ],
+                    vec![
+                        DbValue::Text("jonas.kahnwald@winden-power.de".into()),
+                        DbValue::Text("Jonas Kahnwald".into()),
+                        DbValue::Text("DE".into()),
+                        DbValue::Text("7".into()),
+                        DbValue::Text("2,410.75".into()),
+                        DbValue::Text("2026-10-10 14:05:55".into()),
+                    ],
+                    vec![
+                        DbValue::Text("lukas.weber@main-logistics.de".into()),
+                        DbValue::Text("Lukas Weber".into()),
+                        DbValue::Text("DE".into()),
+                        DbValue::Text("5".into()),
+                        DbValue::Text("1,690.40".into()),
+                        DbValue::Text("2026-10-08 09:18:30".into()),
+                    ],
+                ],
+                execution_time_ms: 4,
+            };
+            workspace_content
+                .query_tab
+                .show_outcome(Ok(RawQueryOutcome::Rows(rs)));
+
+            let win = adw::Window::builder()
+                .title("DBased")
+                .default_width(1440)
+                .default_height(920)
+                .content(&split)
+                .build();
+            win.present();
+
+            let ctx = gtk::glib::MainContext::default();
+            for _ in 0..80 {
+                while ctx.iteration(false) {}
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+
+            let grid = &workspace_content.query_tab.results_grid;
+            for col in 0..=6 {
+                let hdr = grid.child_at(col, 0).expect("header widget");
+                let hdr_bounds = hdr.compute_bounds(grid).expect("hdr bounds");
+                assert!(
+                    hdr_bounds.width() >= MIN_COLUMN_WIDTH as f32,
+                    "col {} hdr_w={}",
                     col,
-                    hdr_bounds.x(),
-                    row,
-                    cell_bounds.x()
+                    hdr_bounds.width()
                 );
-                assert_eq!(
-                    hdr_bounds.width(),
-                    cell_bounds.width(),
-                    "Column {} header width ({}) != row {} cell width ({})",
+                for row in 1..=6 {
+                    let cell = grid.child_at(col, row).expect("cell widget");
+                    let cell_bounds = cell.compute_bounds(grid).expect("cell bounds");
+                    assert_eq!(
+                        hdr_bounds.x(),
+                        cell_bounds.x(),
+                        "Column {} header x ({}) != row {} cell x ({})",
+                        col,
+                        hdr_bounds.x(),
+                        row,
+                        cell_bounds.x()
+                    );
+                    assert_eq!(
+                        hdr_bounds.width(),
+                        cell_bounds.width(),
+                        "Column {} header width ({}) != row {} cell width ({})",
+                        col,
+                        hdr_bounds.width(),
+                        row,
+                        cell_bounds.width()
+                    );
+                }
+                println!(
+                    "Column {}: hdr_x={} hdr_w={} == cell_w={}",
                     col,
+                    hdr_bounds.x(),
                     hdr_bounds.width(),
-                    row,
-                    cell_bounds.width()
+                    hdr_bounds.width()
                 );
             }
-            println!(
-                "Column {}: hdr_x={} hdr_w={} == cell_w={}",
-                col,
-                hdr_bounds.x(),
-                hdr_bounds.width(),
-                hdr_bounds.width()
-            );
-        }
 
-        win.close();
+            win.close();
+            while ctx.iteration(false) {}
+        });
     }
 }

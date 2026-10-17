@@ -799,6 +799,18 @@ impl ContentTab {
         self.query_state.borrow().clone()
     }
 
+    #[cfg(test)]
+    pub(crate) fn current_table_context(&self) -> Option<(String, String)> {
+        self.current_page
+            .borrow()
+            .as_ref()
+            .map(|p| (p.database.clone(), p.table.clone()))
+    }
+
+    pub(crate) fn is_navigation_in_progress(&self) -> bool {
+        *self.nav_in_progress.borrow()
+    }
+
     pub fn set_query_for_table(&self, database: &str, query: ContentQuery) {
         if *self.nav_in_progress.borrow() {
             *self.nav_in_progress.borrow_mut() = false;
@@ -824,10 +836,25 @@ impl ContentTab {
 
     pub fn clear_navigation_history(&self) {
         self.close_long_text_panel();
+        clear_spreadsheet_grid(&self.grid);
         self.nav_back_stack.borrow_mut().clear();
         self.nav_forward_stack.borrow_mut().clear();
         *self.nav_in_progress.borrow_mut() = false;
         *self.current_page.borrow_mut() = None;
+        self.relations.borrow_mut().clear();
+        self.dirty_cells.borrow_mut().clear();
+        self.draft_rows.borrow_mut().clear();
+        self.selected_rows.borrow_mut().clear();
+        self.header_cells.borrow_mut().clear();
+        self.natural_col_widths.borrow_mut().clear();
+        self.col_widths.borrow_mut().clear();
+        *self.query_state.borrow_mut() = ContentQuery::default();
+        self.search_entry.set_text("");
+        self.info_banner.set_revealed(false);
+        self.status_label.set_text("No table selected");
+        self.prev_page_btn.set_sensitive(false);
+        self.next_page_btn.set_sensitive(false);
+        self.update_dirty_badge();
         self.update_nav_buttons();
     }
 
@@ -1268,6 +1295,7 @@ impl ContentTab {
         }
 
         self.close_long_text_panel();
+        clear_spreadsheet_grid(&self.grid);
         self.dirty_cells.borrow_mut().clear();
         self.draft_rows.borrow_mut().clear();
         self.selected_rows.borrow_mut().clear();
@@ -2904,5 +2932,109 @@ mod tests {
     fn non_empty_nullable_cell_is_untouched_on_blur() {
         assert_eq!(blur_normalized_text("abc", true), None);
         assert_eq!(blur_normalized_text(" ", true), None);
+    }
+
+    #[test]
+    fn test_set_page_does_not_leak_blurred_nullable_cell_into_new_page_dirty_cells() {
+        crate::ui::test_util::run_gtk_test(|| {
+            let (cmd_tx, _cmd_rx) = async_channel::unbounded();
+            let tab = ContentTab::new(cmd_tx, |_| {});
+
+            let win = adw::Window::builder()
+                .default_width(600)
+                .default_height(300)
+                .content(&tab.root)
+                .build();
+            win.present();
+
+            let columns = vec![
+                ColumnInfo {
+                    ordinal: 1,
+                    name: "id".to_string(),
+                    data_type: "int".to_string(),
+                    is_nullable: false,
+                    is_primary_key: true,
+                    default_value: None,
+                    extra: String::new(),
+                },
+                ColumnInfo {
+                    ordinal: 2,
+                    name: "nickname".to_string(),
+                    data_type: "varchar(64)".to_string(),
+                    is_nullable: true,
+                    is_primary_key: false,
+                    default_value: None,
+                    extra: String::new(),
+                },
+            ];
+
+            tab.set_page(TablePage {
+                database: "app".to_string(),
+                table: "users".to_string(),
+                columns: columns.clone(),
+                rows: vec![TableRowData {
+                    pk: Some(PrimaryKeyValue {
+                        columns: vec![("id".to_string(), "1".to_string())],
+                    }),
+                    values: vec![
+                        DbValue::Text("1".to_string()),
+                        DbValue::Text("alice".to_string()),
+                    ],
+                }],
+                total_rows: 1,
+                page_limit: 100,
+                page_offset: 0,
+            });
+
+            let ctx = gtk::glib::MainContext::default();
+            while ctx.iteration(false) {}
+
+            // Focus the nullable "nickname" cell at column 2, row 1 and clear its text to ""
+            let cell_box = tab.grid.child_at(2, 1).expect("nickname cell box");
+            let entry = cell_box
+                .first_child()
+                .and_then(|w| w.downcast::<gtk::Entry>().ok())
+                .expect("nickname entry");
+            gtk::prelude::RootExt::set_focus(&win, Some(&entry));
+            while ctx.iteration(false) {}
+            entry.set_text("");
+            while ctx.iteration(false) {}
+
+            assert!(!tab.dirty_cells.borrow().is_empty());
+
+            // Now load a new page while the cleared nullable cell still holds focus
+            tab.set_page(TablePage {
+                database: "app".to_string(),
+                table: "users".to_string(),
+                columns,
+                rows: vec![TableRowData {
+                    pk: Some(PrimaryKeyValue {
+                        columns: vec![("id".to_string(), "2".to_string())],
+                    }),
+                    values: vec![
+                        DbValue::Text("2".to_string()),
+                        DbValue::Text("bob".to_string()),
+                    ],
+                }],
+                total_rows: 1,
+                page_limit: 100,
+                page_offset: 100,
+            });
+            while ctx.iteration(false) {}
+
+            assert!(
+                tab.dirty_cells.borrow().is_empty(),
+                "dirty_cells must be empty after loading a new page, got: {:?}",
+                *tab.dirty_cells.borrow()
+            );
+            let new_cell_box = tab.grid.child_at(2, 1).expect("new nickname cell box");
+            let new_entry = new_cell_box
+                .first_child()
+                .and_then(|w| w.downcast::<gtk::Entry>().ok())
+                .expect("new nickname entry");
+            assert_eq!(new_entry.text().as_str(), "bob");
+
+            win.close();
+        });
     }
 }

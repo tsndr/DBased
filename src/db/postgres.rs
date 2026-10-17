@@ -622,7 +622,12 @@ impl PostgresDriver {
             } else if columns.is_empty() {
                 String::new()
             } else {
-                let pattern = format!("%{}%", trimmed.replace('\'', "''"));
+                let escaped_inner = trimmed
+                    .replace('\\', "\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_")
+                    .replace('\'', "''");
+                let pattern = format!("%{}%", escaped_inner);
                 let predicates: Vec<String> = columns
                     .iter()
                     .map(|c| format!("{}::text ILIKE '{}'", quote_pg_ident(&c.name), pattern))
@@ -1527,7 +1532,13 @@ impl DatabaseDriver for PostgresDriver {
             }
         };
 
-        sqlx::raw_sql(&sql)
+        let exec_sql = if sql.contains(";\n") {
+            format!("BEGIN;\n{};\nCOMMIT;", sql)
+        } else {
+            sql.clone()
+        };
+
+        sqlx::raw_sql(&exec_sql)
             .execute(&pool)
             .await
             .with_context(|| format!("Failed to execute: {}", sql))?;
@@ -1706,21 +1717,26 @@ impl DatabaseDriver for PostgresDriver {
         if updates.is_empty() {
             return Ok(0);
         }
-        let pool = self.pool_for_db(db_name).await?;
-        let mut total_affected = 0u64;
-
+        let mut stmts = Vec::with_capacity(updates.len() + 2);
+        stmts.push("BEGIN".to_string());
         for upd in updates {
-            let Some(sql) = Self::format_update_row_stmt(table, upd)? else {
-                continue;
-            };
-            let res = sqlx::raw_sql(&sql)
-                .execute(&pool)
-                .await
-                .with_context(|| format!("Failed to update row: {}", sql))?;
-            total_affected += res.rows_affected();
+            if let Some(sql) = Self::format_update_row_stmt(table, upd)? {
+                stmts.push(sql);
+            }
         }
+        if stmts.len() == 1 {
+            return Ok(0);
+        }
+        stmts.push("COMMIT".to_string());
+        let batch_sql = stmts.join(";\n");
 
-        Ok(total_affected)
+        let pool = self.pool_for_db(db_name).await?;
+        let res = sqlx::raw_sql(&batch_sql)
+            .execute(&pool)
+            .await
+            .with_context(|| format!("Failed to update row(s) in {}", table))?;
+
+        Ok(res.rows_affected())
     }
 
     async fn insert_row(
@@ -1747,19 +1763,21 @@ impl DatabaseDriver for PostgresDriver {
         if pks.is_empty() {
             return Ok(0);
         }
-        let pool = self.pool_for_db(db_name).await?;
-        let mut deleted = 0u64;
-
+        let mut stmts = Vec::with_capacity(pks.len() + 2);
+        stmts.push("BEGIN".to_string());
         for pk in pks {
-            let sql = Self::format_delete_row_stmt(table, pk)?;
-            let res = sqlx::raw_sql(&sql)
-                .execute(&pool)
-                .await
-                .with_context(|| format!("Failed to delete row: {}", sql))?;
-            deleted += res.rows_affected();
+            stmts.push(Self::format_delete_row_stmt(table, pk)?);
         }
+        stmts.push("COMMIT".to_string());
+        let batch_sql = stmts.join(";\n");
 
-        Ok(deleted)
+        let pool = self.pool_for_db(db_name).await?;
+        let res = sqlx::raw_sql(&batch_sql)
+            .execute(&pool)
+            .await
+            .with_context(|| format!("Failed to delete row(s) from {}", table))?;
+
+        Ok(res.rows_affected())
     }
 
     async fn get_relations(&self, db_name: &str, table: &str) -> Result<Vec<ForeignKeyInfo>> {
@@ -2941,6 +2959,19 @@ mod tests {
         assert_eq!(
             data_sql2,
             "SELECT * FROM \"public\".\"users\" WHERE \"id\" = 1 LIMIT 25 OFFSET 0"
+        );
+
+        let q3 = ContentQuery {
+            limit: 10,
+            offset: 0,
+            sort_column: None,
+            sort_direction: SortDirection::Asc,
+            search_text: "C:\\dir_100%\\".to_string(),
+        };
+        let (count_sql3, _) = PostgresDriver::format_table_content_queries("users", &cols, &q3);
+        assert_eq!(
+            count_sql3,
+            "SELECT COUNT(*) FROM \"public\".\"users\" WHERE (\"id\"::text ILIKE '%C:\\\\dir\\_100\\%\\\\%' OR \"email\"::text ILIKE '%C:\\\\dir\\_100\\%\\\\%')"
         );
     }
 }

@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 type TableCacheMap = Rc<RefCell<BTreeMap<String, Vec<TableInfo>>>>;
-type TableLoadListener = Rc<RefCell<Option<Box<dyn Fn(&str, &[TableInfo])>>>>;
+type TableLoadListener = Rc<RefCell<Option<Rc<dyn Fn(&str, &[TableInfo])>>>>;
 
 #[derive(Clone)]
 pub struct TransferDialogController {
@@ -33,6 +33,13 @@ impl TransferDialogController {
 
     pub fn set_databases(&self, dbs: &[String]) {
         *self.databases.borrow_mut() = dbs.to_vec();
+        self.table_cache.borrow_mut().clear();
+    }
+
+    pub fn clear(&self) {
+        self.databases.borrow_mut().clear();
+        self.table_cache.borrow_mut().clear();
+        *self.on_tables_loaded.borrow_mut() = None;
     }
 
     pub fn cache_database_tables(&self, database: &str, tables: &[TableInfo]) {
@@ -41,7 +48,8 @@ impl TransferDialogController {
                 .borrow_mut()
                 .insert(database.to_string(), tables.to_vec());
         }
-        if let Some(ref cb) = *self.on_tables_loaded.borrow() {
+        let cb_opt = self.on_tables_loaded.borrow().clone();
+        if let Some(cb) = cb_opt {
             cb(database, tables);
         }
     }
@@ -77,7 +85,7 @@ impl TransferDialogController {
         // Group 1: Format & Options
         // ==========================================
         let format_group = adw::PreferencesGroup::builder()
-            .title("Format & Options")
+            .title("Format &amp; Options")
             .build();
 
         let format_labels: Vec<&str> = TransferFormat::ALL.iter().map(|f| f.label()).collect();
@@ -130,7 +138,7 @@ impl TransferDialogController {
         // Group 2: Databases & Tables Checklist
         // ==========================================
         let selection_group = adw::PreferencesGroup::builder()
-            .title("Databases & Tables")
+            .title("Databases &amp; Tables")
             .description("Expand a database to pick individual tables, or check a database to include all of its tables.")
             .build();
 
@@ -230,21 +238,24 @@ impl TransferDialogController {
             let user_toggled_create_db = user_toggled_create_db.clone();
             let suppress_create_db_toggle = suppress_create_db_toggle.clone();
             move || {
-                let map = selected_tables_by_db.borrow();
-                let pending = pending_select_all_dbs.borrow();
-                let mut db_count = 0usize;
-                let mut tbl_count = 0usize;
-                for (db, tbls) in map.iter() {
-                    if !tbls.is_empty() || pending.contains(db) {
-                        db_count += 1;
-                        tbl_count += tbls.len();
+                let (db_count, tbl_count, has_pending) = {
+                    let map = selected_tables_by_db.borrow();
+                    let pending = pending_select_all_dbs.borrow();
+                    let mut db_count = 0usize;
+                    let mut tbl_count = 0usize;
+                    for (db, tbls) in map.iter() {
+                        if !tbls.is_empty() || pending.contains(db) {
+                            db_count += 1;
+                            tbl_count += tbls.len();
+                        }
                     }
-                }
-                for p_db in pending.iter() {
-                    if !map.contains_key(p_db) {
-                        db_count += 1;
+                    for p_db in pending.iter() {
+                        if !map.contains_key(p_db) {
+                            db_count += 1;
+                        }
                     }
-                }
+                    (db_count, tbl_count, !pending.is_empty())
+                };
                 if !*user_toggled_create_db.borrow() {
                     *suppress_create_db_toggle.borrow_mut() = true;
                     create_db_switch.set_active(db_count > 1);
@@ -256,7 +267,7 @@ impl TransferDialogController {
                         db_count, tbl_count
                     ));
                     export_btn.set_sensitive(true);
-                } else if !pending.is_empty() {
+                } else if has_pending {
                     summary_label.set_label(&format!(
                         "{} database(s) selected (loading tables...)",
                         db_count
@@ -301,7 +312,8 @@ impl TransferDialogController {
                     let set_len = map.get(db_name).map(|s| s.len()).unwrap_or(0);
                     !tables.is_empty() && set_len == tables.len()
                 };
-                if let Some(db_chk) = db_check_widgets.borrow().get(db_name) {
+                let db_chk_opt = db_check_widgets.borrow().get(db_name).cloned();
+                if let Some(db_chk) = db_chk_opt {
                     *suppress_checks.borrow_mut() = true;
                     db_chk.set_active(is_all_checked);
                     *suppress_checks.borrow_mut() = false;
@@ -365,7 +377,8 @@ impl TransferDialogController {
                         let all_selected = set.len() == total_db_tables && total_db_tables > 0;
                         drop(map);
 
-                        if let Some(db_chk) = db_check_widgets.borrow().get(&db_str) {
+                        let db_chk_opt = db_check_widgets.borrow().get(&db_str).cloned();
+                        if let Some(db_chk) = db_chk_opt {
                             *suppress_checks.borrow_mut() = true;
                             db_chk.set_active(all_selected);
                             *suppress_checks.borrow_mut() = false;
@@ -382,7 +395,7 @@ impl TransferDialogController {
         {
             let populate_cb = populate_expander_tables.clone();
             *self.on_tables_loaded.borrow_mut() =
-                Some(Box::new(move |db_name: &str, tables: &[TableInfo]| {
+                Some(Rc::new(move |db_name: &str, tables: &[TableInfo]| {
                     populate_cb(db_name, tables);
                 }));
         }
@@ -458,27 +471,35 @@ impl TransferDialogController {
                     }
                     let active = chk.is_active();
                     if let Some(cached) = table_cache.borrow().get(&db_str).cloned() {
+                        {
+                            let mut map = selected_tables_by_db.borrow_mut();
+                            let set = map.entry(db_str.clone()).or_default();
+                            set.clear();
+                            if active {
+                                for t in &cached {
+                                    set.insert(t.name.clone());
+                                }
+                            }
+                        }
                         if !populated_expanders.borrow().contains(&db_str) {
                             populate_expander_tables(&db_str, &cached);
-                        }
-                        *suppress_checks.borrow_mut() = true;
-                        let mut map = selected_tables_by_db.borrow_mut();
-                        let set = map.entry(db_str.clone()).or_default();
-                        set.clear();
-                        for t in &cached {
-                            if active {
-                                set.insert(t.name.clone());
-                            }
-                            if let Some(t_chk) = table_check_widgets
-                                .borrow()
-                                .get(&(db_str.clone(), t.name.clone()))
-                            {
+                        } else {
+                            let checks: Vec<gtk::CheckButton> = {
+                                let widgets = table_check_widgets.borrow();
+                                cached
+                                    .iter()
+                                    .filter_map(|t| {
+                                        widgets.get(&(db_str.clone(), t.name.clone())).cloned()
+                                    })
+                                    .collect()
+                            };
+                            *suppress_checks.borrow_mut() = true;
+                            for t_chk in checks {
                                 t_chk.set_active(active);
                             }
+                            *suppress_checks.borrow_mut() = false;
+                            update_summary();
                         }
-                        drop(map);
-                        *suppress_checks.borrow_mut() = false;
-                        update_summary();
                     } else {
                         if active {
                             pending_select_all_dbs.borrow_mut().insert(db_str.clone());
@@ -505,7 +526,8 @@ impl TransferDialogController {
             let db_check_widgets = db_check_widgets.clone();
             select_all_dbs_btn.connect_clicked(move |_| {
                 for db in &databases {
-                    if let Some(chk) = db_check_widgets.borrow().get(db) {
+                    let chk_opt = db_check_widgets.borrow().get(db).cloned();
+                    if let Some(chk) = chk_opt {
                         if !chk.is_active() {
                             chk.set_active(true);
                         } else {
@@ -527,12 +549,19 @@ impl TransferDialogController {
                 *suppress_checks.borrow_mut() = true;
                 selected_tables_by_db.borrow_mut().clear();
                 pending_select_all_dbs.borrow_mut().clear();
-                for db in &databases {
-                    if let Some(chk) = db_check_widgets.borrow().get(db) {
-                        chk.set_active(false);
-                    }
+                let db_checks: Vec<gtk::CheckButton> = {
+                    let widgets = db_check_widgets.borrow();
+                    databases
+                        .iter()
+                        .filter_map(|db| widgets.get(db).cloned())
+                        .collect()
+                };
+                for chk in db_checks {
+                    chk.set_active(false);
                 }
-                for chk in table_check_widgets.borrow().values() {
+                let tbl_checks: Vec<gtk::CheckButton> =
+                    table_check_widgets.borrow().values().cloned().collect();
+                for chk in tbl_checks {
                     chk.set_active(false);
                 }
                 *suppress_checks.borrow_mut() = false;
@@ -894,7 +923,7 @@ impl TransferDialogController {
         {
             let refresh_cb = refresh_table_dropdown.clone();
             *self.on_tables_loaded.borrow_mut() =
-                Some(Box::new(move |_db_name: &str, _tables: &[TableInfo]| {
+                Some(Rc::new(move |_db_name: &str, _tables: &[TableInfo]| {
                     refresh_cb(None);
                 }));
         }
@@ -1107,3 +1136,119 @@ impl TransferDialogController {
         dialog.present(Some(parent));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn find_check_buttons(root: &gtk::Widget, out: &mut Vec<gtk::CheckButton>) {
+        if let Ok(chk) = root.clone().downcast::<gtk::CheckButton>() {
+            out.push(chk);
+        }
+        let mut child = root.first_child();
+        while let Some(w) = child {
+            find_check_buttons(&w, out);
+            child = w.next_sibling();
+        }
+    }
+
+    #[test]
+    fn test_transfer_controller_set_databases_clears_stale_table_cache_and_allows_reentrant_listener() {
+        let (cmd_tx, _cmd_rx) = async_channel::unbounded();
+        let ctrl = TransferDialogController::new(cmd_tx);
+        ctrl.set_databases(&["db1".to_string(), "db2".to_string()]);
+        ctrl.cache_database_tables(
+            "db1",
+            &[TableInfo {
+                name: "users".to_string(),
+                is_view: false,
+            }],
+        );
+        ctrl.cache_database_tables(
+            "db2",
+            &[TableInfo {
+                name: "orders".to_string(),
+                is_view: false,
+            }],
+        );
+        assert_eq!(ctrl.table_cache.borrow().len(), 2);
+
+        // Updating the database list (e.g. on Refresh / Reconnect) must invalidate cached table lists
+        ctrl.set_databases(&["db1".to_string()]);
+        assert!(
+            ctrl.table_cache.borrow().is_empty(),
+            "set_databases should clear stale table_cache entries"
+        );
+
+        // Re-entrantly clearing `on_tables_loaded` inside the listener must not panic with RefCell borrow error
+        let ctrl_for_cb = ctrl.clone();
+        *ctrl.on_tables_loaded.borrow_mut() = Some(Rc::new(move |_db, _tables| {
+            *ctrl_for_cb.on_tables_loaded.borrow_mut() = None;
+        }));
+        ctrl.cache_database_tables(
+            "db1",
+            &[TableInfo {
+                name: "users".to_string(),
+                is_view: false,
+            }],
+        );
+        assert!(ctrl.on_tables_loaded.borrow().is_none());
+    }
+
+    #[test]
+    fn test_export_dialog_toggling_cached_unpopulated_db_checkbox_keeps_it_active() {
+        crate::ui::test_util::run_gtk_test(|| {
+            let (cmd_tx, _cmd_rx) = async_channel::unbounded();
+            let ctrl = TransferDialogController::new(cmd_tx);
+            ctrl.set_databases(&["db1".to_string(), "db2".to_string()]);
+            ctrl.cache_database_tables(
+                "db1",
+                &[TableInfo {
+                    name: "users".to_string(),
+                    is_view: false,
+                }],
+            );
+
+            let host_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+            let win = adw::Window::builder()
+                .default_width(600)
+                .default_height(500)
+                .content(&host_box)
+                .build();
+            win.present();
+
+            ctrl.open_export_dialog(host_box.upcast_ref::<gtk::Widget>(), "db1", None);
+            let ctx = gtk::glib::MainContext::default();
+            while ctx.iteration(false) {}
+
+            // Populate cache for db2 directly without firing on_tables_loaded so db2's expander is unpopulated
+            ctrl.table_cache.borrow_mut().insert(
+                "db2".to_string(),
+                vec![TableInfo {
+                    name: "invoices".to_string(),
+                    is_view: false,
+                }],
+            );
+
+            let mut checks = Vec::new();
+            find_check_buttons(win.upcast_ref::<gtk::Widget>(), &mut checks);
+            // Expect: db1 db_chk (active), db1.users tbl_chk (active), db2 db_chk (inactive)
+            let db2_chk = checks
+                .iter()
+                .find(|c| !c.is_active())
+                .cloned()
+                .expect("unchecked db2 checkbox");
+
+            db2_chk.set_active(true);
+            while ctx.iteration(false) {}
+
+            assert!(
+                db2_chk.is_active(),
+                "Checking a cached unpopulated database checkbox must keep the database checkbox active"
+            );
+
+            win.close();
+        });
+    }
+}
+

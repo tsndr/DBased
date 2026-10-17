@@ -82,15 +82,32 @@ impl SecretStore {
                     Err(_) => false,
                 };
 
-                if !keyring_ok {
-                    Self::save_fallback(&bm_id, &db_pass, &ssh_sec)?;
-                } else {
-                    let _ = Self::save_fallback(&bm_id, &db_pass, &ssh_sec);
-                }
+                Self::persist_after_keyring_attempt(
+                    &Self::fallback_path(),
+                    keyring_ok,
+                    &bm_id,
+                    &db_pass,
+                    &ssh_sec,
+                )?;
                 Ok(())
             })
             .await
             .map_err(|e| anyhow!("SecretStore task failed: {}", e))?
+    }
+
+    fn persist_after_keyring_attempt(
+        fallback_path: &std::path::Path,
+        keyring_ok: bool,
+        bookmark_id: &str,
+        db_password: &str,
+        ssh_secret: &str,
+    ) -> Result<()> {
+        if !keyring_ok {
+            Self::save_fallback_at(fallback_path, bookmark_id, db_password, ssh_secret)?;
+        } else {
+            let _ = Self::delete_fallback_at(fallback_path, bookmark_id);
+        }
+        Ok(())
     }
 
     pub async fn load_secrets(bookmark_id: &str) -> StoredSecrets {
@@ -169,9 +186,32 @@ impl SecretStore {
             .await;
     }
 
-    fn save_fallback(bookmark_id: &str, db_password: &str, ssh_secret: &str) -> Result<()> {
-        let path = Self::fallback_path();
-        Self::save_fallback_at(&path, bookmark_id, db_password, ssh_secret)
+    fn write_private_file_atomically(path: &std::path::Path, content: &str) -> Result<()> {
+        use std::io::Write;
+
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let tmp_path = path.with_extension(format!("tmp.{}", uuid::Uuid::new_v4()));
+        {
+            let mut opts = fs::OpenOptions::new();
+            opts.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            let mut f = opts.open(&tmp_path)?;
+            f.write_all(content.as_bytes())?;
+            f.sync_all()?;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&tmp_path, fs::Permissions::from_mode(0o600));
+        }
+        fs::rename(&tmp_path, path)?;
+        Ok(())
     }
 
     fn save_fallback_at(
@@ -180,9 +220,6 @@ impl SecretStore {
         db_password: &str,
         ssh_secret: &str,
     ) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
         let mut file: FallbackSecretsFile = if path.exists() {
             let raw = fs::read_to_string(path).unwrap_or_default();
             toml::from_str(&raw).unwrap_or_default()
@@ -198,13 +235,7 @@ impl SecretStore {
             },
         );
         let serialized = toml::to_string_pretty(&file)?;
-        fs::write(path, serialized)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
-        }
-        Ok(())
+        Self::write_private_file_atomically(path, &serialized)
     }
 
     fn load_fallback(bookmark_id: &str) -> Option<StoredSecrets> {
@@ -234,8 +265,7 @@ impl SecretStore {
         let mut file: FallbackSecretsFile = toml::from_str(&raw).unwrap_or_default();
         file.entries.remove(bookmark_id);
         let serialized = toml::to_string_pretty(&file)?;
-        fs::write(path, serialized)?;
-        Ok(())
+        Self::write_private_file_atomically(path, &serialized)
     }
 }
 
@@ -247,15 +277,85 @@ mod tests {
     fn test_secret_store_from_glib_context_without_tokio_reactor() {
         let ctx = gtk4::glib::MainContext::new();
         let test_id = format!("test-bm-{}", uuid::Uuid::new_v4());
+        let tmp_path = std::env::temp_dir().join(format!(
+            "dbased_glib_secrets_test_{}/secrets.toml",
+            uuid::Uuid::new_v4()
+        ));
         ctx.block_on(async {
-            SecretStore::save_secrets(&test_id, "s3cr3t_db", "s3cr3t_ssh")
+            let p_save = tmp_path.clone();
+            let id_save = test_id.clone();
+            secret_runtime()
+                .spawn(async move {
+                    SecretStore::persist_after_keyring_attempt(
+                        &p_save,
+                        false,
+                        &id_save,
+                        "s3cr3t_db",
+                        "s3cr3t_ssh",
+                    )
+                })
                 .await
+                .unwrap()
                 .unwrap();
-            let loaded = SecretStore::load_secrets(&test_id).await;
+
+            let p_load = tmp_path.clone();
+            let id_load = test_id.clone();
+            let loaded = secret_runtime()
+                .spawn(async move { SecretStore::load_fallback_at(&p_load, &id_load) })
+                .await
+                .unwrap()
+                .unwrap();
             assert_eq!(loaded.db_password, "s3cr3t_db");
             assert_eq!(loaded.ssh_secret, "s3cr3t_ssh");
-            SecretStore::delete_secrets(&test_id).await;
+
+            let p_del = tmp_path.clone();
+            let id_del = test_id.clone();
+            secret_runtime()
+                .spawn(async move { SecretStore::delete_fallback_at(&p_del, &id_del) })
+                .await
+                .unwrap()
+                .unwrap();
         });
+        if let Some(parent) = tmp_path.parent() {
+            let _ = fs::remove_dir_all(parent);
+        }
+    }
+
+    #[test]
+    fn test_keyring_success_does_not_write_plaintext_fallback_and_removes_stale_entry() {
+        let tmp_path = std::env::temp_dir().join(format!(
+            "dbased_keyring_ok_test_{}/secrets.toml",
+            uuid::Uuid::new_v4()
+        ));
+
+        // 1. When keyring succeeds for a fresh bookmark, no fallback file or entry should be written
+        SecretStore::persist_after_keyring_attempt(&tmp_path, true, "bm-fresh", "top_secret", "ssh_key")
+            .unwrap();
+        assert!(
+            SecretStore::load_fallback_at(&tmp_path, "bm-fresh").is_none(),
+            "Plaintext fallback must not be written when OS keyring succeeds"
+        );
+
+        // 2. If a stale fallback entry existed previously, keyring success should remove it
+        SecretStore::save_fallback_at(&tmp_path, "bm-migrated", "old_pw", "old_ssh").unwrap();
+        assert!(SecretStore::load_fallback_at(&tmp_path, "bm-migrated").is_some());
+
+        SecretStore::persist_after_keyring_attempt(
+            &tmp_path,
+            true,
+            "bm-migrated",
+            "new_pw",
+            "new_ssh",
+        )
+        .unwrap();
+        assert!(
+            SecretStore::load_fallback_at(&tmp_path, "bm-migrated").is_none(),
+            "Stale plaintext fallback entry must be removed when OS keyring succeeds"
+        );
+
+        if let Some(parent) = tmp_path.parent() {
+            let _ = fs::remove_dir_all(parent);
+        }
     }
 
     #[test]

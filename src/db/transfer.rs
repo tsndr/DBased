@@ -416,15 +416,20 @@ async fn export_table_to_csv_path(
     Ok(total_rows)
 }
 
-async fn fetch_table_as_json_rows(
+async fn stream_table_json_array<W: Write>(
     driver: &dyn DatabaseDriver,
     db_name: &str,
     table: &str,
-) -> Result<Vec<serde_json::Value>> {
+    out: &mut W,
+    indent_prefix: &str,
+) -> Result<u64> {
     let cols = driver.get_table_structure(db_name, table).await?;
     let col_count = cols.len();
     let mut offset = 0u64;
-    let mut json_rows = Vec::new();
+    let mut total_rows = 0u64;
+    let mut first_row = true;
+
+    out.write_all(b"[")?;
 
     loop {
         let batch = driver
@@ -434,6 +439,12 @@ async fn fetch_table_as_json_rows(
             break;
         }
         for row in &batch {
+            if first_row {
+                out.write_all(b"\n")?;
+                first_row = false;
+            } else {
+                out.write_all(b",\n")?;
+            }
             let mut obj = serde_json::Map::new();
             for (idx, col) in cols.iter().enumerate() {
                 let val = match row.get(idx) {
@@ -442,16 +453,24 @@ async fn fetch_table_as_json_rows(
                 };
                 obj.insert(col.name.clone(), val);
             }
-            json_rows.push(serde_json::Value::Object(obj));
+            out.write_all(indent_prefix.as_bytes())?;
+            out.write_all(b"  ")?;
+            serde_json::to_writer(&mut *out, &serde_json::Value::Object(obj))?;
         }
         let fetched = batch.len() as u64;
+        total_rows += fetched;
         offset += fetched;
         if fetched < EXPORT_FETCH_BATCH_SIZE as u64 {
             break;
         }
     }
 
-    Ok(json_rows)
+    if !first_row {
+        out.write_all(b"\n")?;
+        out.write_all(indent_prefix.as_bytes())?;
+    }
+    out.write_all(b"]")?;
+    Ok(total_rows)
 }
 
 async fn export_table_to_json_path(
@@ -460,12 +479,12 @@ async fn export_table_to_json_path(
     table: &str,
     path: &Path,
 ) -> Result<u64> {
-    let json_rows = fetch_table_as_json_rows(driver, db_name, table).await?;
-    let row_count = json_rows.len() as u64;
-    let formatted = serde_json::to_string_pretty(&json_rows)?;
-    let mut f = File::create(path)
+    let f = File::create(path)
         .with_context(|| format!("Failed to create JSON file '{}'", path.display()))?;
-    f.write_all(formatted.as_bytes())?;
+    let mut out = BufWriter::new(f);
+    let row_count = stream_table_json_array(driver, db_name, table, &mut out, "").await?;
+    out.write_all(b"\n")?;
+    out.flush()?;
     Ok(row_count)
 }
 
@@ -474,28 +493,39 @@ async fn export_bundle_to_json_path(
     selections: &[DatabaseTableSelection],
     path: &Path,
 ) -> Result<u64> {
-    let mut databases_map = serde_json::Map::new();
+    let f = File::create(path)
+        .with_context(|| format!("Failed to create JSON bundle '{}'", path.display()))?;
+    let mut out = BufWriter::new(f);
     let mut total_rows = 0u64;
 
-    for sel in selections {
-        let mut tables_map = serde_json::Map::new();
-        for table in &sel.tables {
-            let rows = fetch_table_as_json_rows(driver, &sel.database, table).await?;
-            total_rows += rows.len() as u64;
-            tables_map.insert(table.clone(), serde_json::Value::Array(rows));
+    out.write_all(b"{\n  \"databases\": {")?;
+    for (db_idx, sel) in selections.iter().enumerate() {
+        if db_idx > 0 {
+            out.write_all(b",")?;
         }
-        databases_map.insert(sel.database.clone(), serde_json::Value::Object(tables_map));
+        out.write_all(b"\n    ")?;
+        serde_json::to_writer(&mut out, &sel.database)?;
+        out.write_all(b": {")?;
+        for (tbl_idx, table) in sel.tables.iter().enumerate() {
+            if tbl_idx > 0 {
+                out.write_all(b",")?;
+            }
+            out.write_all(b"\n      ")?;
+            serde_json::to_writer(&mut out, table)?;
+            out.write_all(b": ")?;
+            total_rows +=
+                stream_table_json_array(driver, &sel.database, table, &mut out, "      ").await?;
+        }
+        if !sel.tables.is_empty() {
+            out.write_all(b"\n    ")?;
+        }
+        out.write_all(b"}")?;
     }
-
-    let mut root = serde_json::Map::new();
-    root.insert(
-        "databases".to_string(),
-        serde_json::Value::Object(databases_map),
-    );
-    let formatted = serde_json::to_string_pretty(&serde_json::Value::Object(root))?;
-    let mut f = File::create(path)
-        .with_context(|| format!("Failed to create JSON bundle '{}'", path.display()))?;
-    f.write_all(formatted.as_bytes())?;
+    if !selections.is_empty() {
+        out.write_all(b"\n  ")?;
+    }
+    out.write_all(b"}\n}\n")?;
+    out.flush()?;
     Ok(total_rows)
 }
 
@@ -530,7 +560,10 @@ async fn run_sql_import(driver: &mut dyn DatabaseDriver, spec: &ImportSpec) -> R
         let content = fs::read_to_string(file_path)
             .with_context(|| format!("Failed to read SQL file '{}'", file_path.display()))?;
         let legacy_no_backslash = is_legacy_dbased_mysql_export(&content);
-        let items = parse_sql_script_items_with_mode(&content, legacy_no_backslash);
+        let no_backslash_in_std_strings = legacy_no_backslash
+            || driver.engine() == DbEngine::Postgres
+            || is_postgres_sql_script(&content);
+        let items = parse_sql_script_items_with_mode(&content, no_backslash_in_std_strings);
 
         // Determine how many distinct databases this script file explicitly targets via
         // `USE` / `\connect` / `-- DBASED_DATABASE:` / `CREATE DATABASE`.
@@ -1269,13 +1302,34 @@ pub fn is_legacy_dbased_mysql_export(script: &str) -> bool {
         && !header.contains("NO_AUTO_VALUE_ON_ZERO")
 }
 
+pub fn is_postgres_sql_script(script: &str) -> bool {
+    let header: String = script.lines().take(25).collect::<Vec<_>>().join("\n");
+    header.contains("-- Engine: PostgreSQL")
+        || header.contains("PostgreSQL database dump")
+        || header.contains("standard_conforming_strings = on")
+        || header.contains("standard_conforming_strings = 'on'")
+}
+
+fn is_at_line_indent(chars: &[char], idx: usize) -> bool {
+    let mut j = idx;
+    while j > 0 {
+        j -= 1;
+        match chars[j] {
+            '\n' | '\r' => return true,
+            ' ' | '\t' => continue,
+            _ => return false,
+        }
+    }
+    true
+}
+
 /// Splits a SQL script into sequential `SqlScriptItem`s (`UseDatabase` directives and individual
 /// executable `Statement`s), properly handling single-quoted literals, double-quoted identifiers,
-/// backtick-quoted identifiers, `--` line comments, `/* ... */` block comments, and PostgreSQL
+/// backtick-quoted identifiers, `--` and `#` line comments, `/* ... */` block comments, and PostgreSQL
 /// `$tag$...$tag$` dollar-quoted strings.
 pub fn parse_sql_script_items(script: &str) -> Vec<SqlScriptItem> {
-    let legacy_no_backslash = is_legacy_dbased_mysql_export(script);
-    parse_sql_script_items_with_mode(script, legacy_no_backslash)
+    let no_backslash = is_legacy_dbased_mysql_export(script) || is_postgres_sql_script(script);
+    parse_sql_script_items_with_mode(script, no_backslash)
 }
 
 pub fn parse_sql_script_items_with_mode(
@@ -1307,6 +1361,21 @@ pub fn parse_sql_script_items_with_mode(
             {
                 flush_pending_statement(&mut current, &mut items);
                 items.push(SqlScriptItem::UseDatabase(unquote_ident(db_directive)));
+            }
+            if i < len && chars[i] == '\n' {
+                i += 1;
+            }
+            continue;
+        }
+
+        // 1b. MySQL `# ...` line comment (at start of statement or line indent, excluding PG `#>` / `#-`)
+        if ch == '#'
+            && chars.get(i + 1) != Some(&'>')
+            && chars.get(i + 1) != Some(&'-')
+            && (current.trim().is_empty() || is_at_line_indent(&chars, i))
+        {
+            while i < len && chars[i] != '\n' {
+                i += 1;
             }
             if i < len && chars[i] == '\n' {
                 i += 1;
@@ -1362,13 +1431,20 @@ pub fn parse_sql_script_items_with_mode(
         // 4. Quoted strings / identifiers (`'`, `"`, `` ` ``)
         if ch == '\'' || ch == '"' || ch == '`' {
             let quote = ch;
+            let is_pg_escape_str = quote == '\''
+                && i > 0
+                && (chars[i - 1] == 'E' || chars[i - 1] == 'e')
+                && (i < 2 || (!chars[i - 2].is_alphanumeric() && chars[i - 2] != '_'));
+            let allow_backslash_escape =
+                (!no_backslash_escapes && (quote == '\'' || quote == '"')) || is_pg_escape_str;
+
             current.push(ch);
             i += 1;
             while i < len {
                 let c = chars[i];
                 current.push(c);
                 i += 1;
-                if !no_backslash_escapes && c == '\\' && quote == '\'' && i < len {
+                if allow_backslash_escape && c == '\\' && i < len {
                     current.push(chars[i]);
                     i += 1;
                 } else if c == quote {
@@ -1988,6 +2064,37 @@ INSERT INTO "tbl;name" (`col;name`) VALUES ('val;1');
                 "INSERT INTO `items` VALUES ('C:\\\\'), ('mysqldump \\'escaped\\' ; quote')"
                     .to_string()
             )
+        );
+    }
+
+    #[test]
+    fn test_parse_sql_script_items_postgres_backslashes_and_mysql_hash_comments() {
+        // 1. PostgreSQL export where standard_conforming_strings applies:
+        //    `\` is literal inside `'...'` (so `'C:\'` ends at `'`), while `E'...'` supports `\'`.
+        let pg_script = "-- DBased SQL Export\n-- Engine: PostgreSQL\n\nINSERT INTO \"public\".\"paths\" VALUES ('C:\\'), ('D:\\folder\\');\nINSERT INTO \"public\".\"escaped\" VALUES (E'it\\'s ; still one literal');\n";
+        let pg_items = parse_sql_script_items(pg_script);
+        assert_eq!(
+            pg_items,
+            vec![
+                SqlScriptItem::Statement(
+                    "INSERT INTO \"public\".\"paths\" VALUES ('C:\\'), ('D:\\folder\\')".to_string()
+                ),
+                SqlScriptItem::Statement(
+                    "INSERT INTO \"public\".\"escaped\" VALUES (E'it\\'s ; still one literal')"
+                        .to_string()
+                ),
+            ]
+        );
+
+        // 2. MySQL `#` comments with unmatched quotes and semicolons
+        let mysql_hash_script = "# Header comment with 'unclosed quote and ; semicolon\nINSERT INTO `t` VALUES (1); # trailing comment with ' and ;\n  # indented comment with ' and ;\nINSERT INTO `t` VALUES (2);\n";
+        let hash_items = parse_sql_script_items(mysql_hash_script);
+        assert_eq!(
+            hash_items,
+            vec![
+                SqlScriptItem::Statement("INSERT INTO `t` VALUES (1)".to_string()),
+                SqlScriptItem::Statement("INSERT INTO `t` VALUES (2)".to_string()),
+            ]
         );
     }
 
@@ -3152,6 +3259,105 @@ SET FOREIGN_KEY_CHECKS = 1;
         assert_eq!(
             rows_after_json[&("db_two".to_string(), "items".to_string())].len(),
             2
+        );
+
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_json_streaming_multi_batch_export_and_import() {
+        let tmp_dir =
+            std::env::temp_dir().join(format!("dbased_json_batch_{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&tmp_dir).unwrap();
+
+        let mut driver = MockDriver::new(DbEngine::Postgres);
+        let row_count = (EXPORT_FETCH_BATCH_SIZE as usize * 2) + 123;
+        {
+            let mut rows = driver.rows.lock().unwrap();
+            let user_rows = (1..=row_count)
+                .map(|i| {
+                    vec![
+                        DbValue::Text(i.to_string()),
+                        DbValue::Text(format!("User {}", i)),
+                        if i % 3 == 0 {
+                            DbValue::Null
+                        } else {
+                            DbValue::Text("true".to_string())
+                        },
+                        DbValue::Text(format!("{}.50", i)),
+                    ]
+                })
+                .collect();
+            rows.insert(("db_one".to_string(), "users".to_string()), user_rows);
+        }
+
+        // Single-table multi-batch streaming JSON export
+        let table_json_path = tmp_dir.join("users_large.json");
+        run_export(
+            &driver,
+            &ExportSpec {
+                format: TransferFormat::Json,
+                selections: vec![DatabaseTableSelection {
+                    database: "db_one".to_string(),
+                    tables: vec!["users".to_string()],
+                }],
+                sql_mode: SqlExportMode::DataOnly,
+                include_create_database: false,
+                include_drop_table: false,
+                destination: ExportDestination::SingleFile(table_json_path.clone()),
+            },
+        )
+        .await
+        .unwrap();
+
+        // Bundle multi-batch streaming JSON export
+        let bundle_json_path = tmp_dir.join("bundle_large.json");
+        run_export(
+            &driver,
+            &ExportSpec {
+                format: TransferFormat::Json,
+                selections: vec![
+                    DatabaseTableSelection {
+                        database: "db_one".to_string(),
+                        tables: vec!["users".to_string()],
+                    },
+                    DatabaseTableSelection {
+                        database: "db_two".to_string(),
+                        tables: vec!["items".to_string()],
+                    },
+                ],
+                sql_mode: SqlExportMode::DataOnly,
+                include_create_database: false,
+                include_drop_table: false,
+                destination: ExportDestination::SingleFile(bundle_json_path.clone()),
+            },
+        )
+        .await
+        .unwrap();
+
+        // Round-trip import of the multi-batch bundle with truncate
+        run_import(
+            &mut driver,
+            &ImportSpec {
+                format: TransferFormat::Json,
+                source: ImportSource::Files(vec![bundle_json_path]),
+                target_database: None,
+                target_table: None,
+                truncate_before_import: true,
+                current_ui_database: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let rows_after = driver.rows.lock().unwrap().clone();
+        assert_eq!(
+            rows_after[&("db_one".to_string(), "users".to_string())].len(),
+            row_count
+        );
+        assert_eq!(
+            rows_after[&("db_one".to_string(), "users".to_string())][row_count - 1][1],
+            DbValue::Text(format!("User {}", row_count))
         );
 
         let _ = fs::remove_dir_all(&tmp_dir);

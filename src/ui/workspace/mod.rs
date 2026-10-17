@@ -98,6 +98,19 @@ impl WorkspaceContent {
             users_tab,
         }
     }
+
+    pub fn clear_table_tabs(&self) {
+        self.content_tab.clear_navigation_history();
+        self.structure_tab.clear();
+        self.relations_tab.clear_table();
+    }
+
+    pub fn clear_all(&self) {
+        self.clear_table_tabs();
+        self.relations_tab.clear();
+        self.query_tab.clear();
+        self.users_tab.clear();
+    }
 }
 
 pub const MIN_COLUMN_WIDTH: i32 = 48;
@@ -512,167 +525,165 @@ mod tests {
     use gtk4 as gtk;
 
     #[test]
-    #[ignore]
     fn verify_live_gtk_sticky_header_on_scroll() {
-        let _ = adw::init();
-        sourceview5::init();
-        crate::app::load_css();
+        crate::ui::test_util::run_gtk_test(|| {
+            let (cmd_tx, _cmd_rx) = async_channel::unbounded();
+            let workspace_content = WorkspaceContent::new(cmd_tx, |_| {});
+            workspace_content.stack.set_visible_child_name("content");
 
-        let (cmd_tx, _cmd_rx) = async_channel::unbounded();
-        let workspace_content = WorkspaceContent::new(cmd_tx, |_| {});
-        workspace_content.stack.set_visible_child_name("content");
+            let columns = vec![
+                ColumnInfo {
+                    ordinal: 1,
+                    name: "id".into(),
+                    data_type: "bigint".into(),
+                    is_nullable: false,
+                    is_primary_key: true,
+                    default_value: None,
+                    extra: String::new(),
+                },
+                ColumnInfo {
+                    ordinal: 2,
+                    name: "email".into(),
+                    data_type: "varchar(255)".into(),
+                    is_nullable: false,
+                    is_primary_key: false,
+                    default_value: None,
+                    extra: String::new(),
+                },
+            ];
 
-        let columns = vec![
-            ColumnInfo {
-                ordinal: 1,
-                name: "id".into(),
-                data_type: "bigint".into(),
-                is_nullable: false,
-                is_primary_key: true,
-                default_value: None,
-                extra: String::new(),
-            },
-            ColumnInfo {
-                ordinal: 2,
-                name: "email".into(),
-                data_type: "varchar(255)".into(),
-                is_nullable: false,
-                is_primary_key: false,
-                default_value: None,
-                extra: String::new(),
-            },
-        ];
-
-        let mut rows = Vec::new();
-        for i in 1..=60 {
-            rows.push(TableRowData {
-                pk: Some(PrimaryKeyValue {
-                    columns: vec![("id".into(), i.to_string())],
-                }),
-                values: vec![
-                    DbValue::Text(i.to_string()),
-                    DbValue::Text(format!("user{}@example.com", i)),
-                ],
-            });
-        }
-
-        workspace_content.content_tab.set_page(TablePage {
-            database: "test_db".into(),
-            table: "users".into(),
-            columns,
-            rows,
-            total_rows: 60,
-            page_offset: 0,
-            page_limit: 100,
-        });
-
-        let win = adw::Window::builder()
-            .title("DBased Sticky Header Test")
-            .default_width(900)
-            .default_height(400)
-            .content(&workspace_content.page)
-            .build();
-        win.present();
-
-        let ctx = gtk::glib::MainContext::default();
-        for _ in 0..40 {
-            while ctx.iteration(false) {}
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-
-        let grid = workspace_content
-            .content_tab
-            .root
-            .observe_children()
-            .into_iter()
-            .flatten()
-            .find_map(|obj| obj.downcast::<gtk::Paned>().ok())
-            .and_then(|p| p.start_child())
-            .and_then(|w| w.downcast::<gtk::ScrolledWindow>().ok())
-            .expect("content scrolled window");
-
-        let vadj = grid.vadjustment();
-        assert!(
-            vadj.upper() > vadj.page_size() + 200.0,
-            "Expected scrollable content: upper={} page_size={}",
-            vadj.upper(),
-            vadj.page_size()
-        );
-
-        let inner_grid = grid
-            .child()
-            .and_then(|vp| vp.downcast::<gtk::Viewport>().ok())
-            .and_then(|vp| vp.child())
-            .and_then(|g| g.downcast::<gtk::Grid>().ok())
-            .expect("inner spreadsheet grid");
-
-        let hdr_col1 = inner_grid.child_at(1, 0).expect("header col 1");
-        let hdr_bounds_before = hdr_col1.compute_bounds(&grid).expect("bounds before");
-        assert_eq!(
-            hdr_bounds_before.y(),
-            0.0,
-            "Header should start flush at y=0 of scroll window, got y={}",
-            hdr_bounds_before.y()
-        );
-
-        // Test fractional scroll offsets (e.g. step_increment = page_size * 0.1 in Structure view)
-        // to ensure the header never develops a 1-2px gap above it.
-        for test_v in [10.1, 10.4, 10.5, 10.6, 10.9, 33.8, 67.6, 101.4, 180.3, 180.7] {
-            vadj.set_value(test_v);
-            for _ in 0..5 {
-                while ctx.iteration(false) {}
-                std::thread::sleep(std::time::Duration::from_millis(5));
+            let mut rows = Vec::new();
+            for i in 1..=60 {
+                rows.push(TableRowData {
+                    pk: Some(PrimaryKeyValue {
+                        columns: vec![("id".into(), i.to_string())],
+                    }),
+                    values: vec![
+                        DbValue::Text(i.to_string()),
+                        DbValue::Text(format!("user{}@example.com", i)),
+                    ],
+                });
             }
-            let hdr_b = hdr_col1.compute_bounds(&grid).expect("hdr bounds");
-            assert_eq!(
-                hdr_b.y(),
-                0.0,
-                "Header must stay flush at y=0.0 for fractional vadj={}, got y={}",
-                test_v,
-                hdr_b.y()
+
+            workspace_content.content_tab.set_page(TablePage {
+                database: "test_db".into(),
+                table: "users".into(),
+                columns,
+                rows,
+                total_rows: 60,
+                page_offset: 0,
+                page_limit: 100,
+            });
+
+            let win = adw::Window::builder()
+                .title("DBased Sticky Header Test")
+                .default_width(900)
+                .default_height(400)
+                .content(&workspace_content.page)
+                .build();
+            win.present();
+
+            let ctx = gtk::glib::MainContext::default();
+            for _ in 0..40 {
+                while ctx.iteration(false) {}
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+
+            let grid = workspace_content
+                .content_tab
+                .root
+                .observe_children()
+                .into_iter()
+                .flatten()
+                .find_map(|obj| obj.downcast::<gtk::Paned>().ok())
+                .and_then(|p| p.start_child())
+                .and_then(|w| w.downcast::<gtk::ScrolledWindow>().ok())
+                .expect("content scrolled window");
+
+            let vadj = grid.vadjustment();
+            assert!(
+                vadj.upper() > vadj.page_size() + 200.0,
+                "Expected scrollable content: upper={} page_size={}",
+                vadj.upper(),
+                vadj.page_size()
             );
-        }
 
-        // Scroll down by 180px
-        vadj.set_value(180.0);
-        for _ in 0..30 {
+            let inner_grid = grid
+                .child()
+                .and_then(|vp| vp.downcast::<gtk::Viewport>().ok())
+                .and_then(|vp| vp.child())
+                .and_then(|g| g.downcast::<gtk::Grid>().ok())
+                .expect("inner spreadsheet grid");
+
+            let hdr_col1 = inner_grid.child_at(1, 0).expect("header col 1");
+            let hdr_bounds_before = hdr_col1.compute_bounds(&grid).expect("bounds before");
+            assert_eq!(
+                hdr_bounds_before.y(),
+                0.0,
+                "Header should start flush at y=0 of scroll window, got y={}",
+                hdr_bounds_before.y()
+            );
+
+            // Test fractional scroll offsets (e.g. step_increment = page_size * 0.1 in Structure view)
+            // to ensure the header never develops a 1-2px gap above it.
+            for test_v in [10.1, 10.4, 10.5, 10.6, 10.9, 33.8, 67.6, 101.4, 180.3, 180.7] {
+                vadj.set_value(test_v);
+                for _ in 0..5 {
+                    while ctx.iteration(false) {}
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                let hdr_b = hdr_col1.compute_bounds(&grid).expect("hdr bounds");
+                assert_eq!(
+                    hdr_b.y(),
+                    0.0,
+                    "Header must stay flush at y=0.0 for fractional vadj={}, got y={}",
+                    test_v,
+                    hdr_b.y()
+                );
+            }
+
+            // Scroll down by 180px
+            vadj.set_value(180.0);
+            for _ in 0..30 {
+                while ctx.iteration(false) {}
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+
+            let hdr_bounds_after = hdr_col1.compute_bounds(&grid).expect("bounds after");
+            let row1_col1 = inner_grid.child_at(1, 1).expect("row 1 col 1");
+            let row1_bounds_after = row1_col1.compute_bounds(&grid).expect("row1 bounds after");
+            println!(
+                "After scroll (180px): hdr_bounds_in_scroll = {:?}, row1_bounds_in_scroll = {:?}",
+                hdr_bounds_after, row1_bounds_after
+            );
+
+            assert!(
+                hdr_bounds_after.y().abs() <= 2.0,
+                "Sticky header must remain at y=0 in ScrolledWindow after scrolling down, got y={}",
+                hdr_bounds_after.y()
+            );
+            assert!(
+                row1_bounds_after.y() < -100.0,
+                "Row 1 should have scrolled above viewport, got y={}",
+                row1_bounds_after.y()
+            );
+
+            // Verify pointer picking at the header position hits the header cell (or its child button), not a data row underneath!
+            let pick_x = (hdr_bounds_after.x() + hdr_bounds_after.width() * 0.5) as f64;
+            let pick_y = (hdr_bounds_after.y() + hdr_bounds_after.height() * 0.5) as f64;
+            let picked = grid
+                .pick(pick_x, pick_y, gtk::PickFlags::DEFAULT)
+                .expect("picked widget");
+            println!("Picked widget at ({}, {}): {:?}", pick_x, pick_y, picked);
+            assert!(
+                picked == hdr_col1 || picked.is_ancestor(&hdr_col1),
+                "Expected picked widget at top of scrolled table to be inside header cell, got {:?}",
+                picked
+            );
+
+            win.close();
             while ctx.iteration(false) {}
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-
-        let hdr_bounds_after = hdr_col1.compute_bounds(&grid).expect("bounds after");
-        let row1_col1 = inner_grid.child_at(1, 1).expect("row 1 col 1");
-        let row1_bounds_after = row1_col1.compute_bounds(&grid).expect("row1 bounds after");
-        println!(
-            "After scroll (180px): hdr_bounds_in_scroll = {:?}, row1_bounds_in_scroll = {:?}",
-            hdr_bounds_after, row1_bounds_after
-        );
-
-        assert!(
-            hdr_bounds_after.y().abs() <= 2.0,
-            "Sticky header must remain at y=0 in ScrolledWindow after scrolling down, got y={}",
-            hdr_bounds_after.y()
-        );
-        assert!(
-            row1_bounds_after.y() < -100.0,
-            "Row 1 should have scrolled above viewport, got y={}",
-            row1_bounds_after.y()
-        );
-
-        // Verify pointer picking at the header position hits the header cell (or its child button), not a data row underneath!
-        let pick_x = (hdr_bounds_after.x() + hdr_bounds_after.width() * 0.5) as f64;
-        let pick_y = (hdr_bounds_after.y() + hdr_bounds_after.height() * 0.5) as f64;
-        let picked = grid
-            .pick(pick_x, pick_y, gtk::PickFlags::DEFAULT)
-            .expect("picked widget");
-        println!("Picked widget at ({}, {}): {:?}", pick_x, pick_y, picked);
-        assert!(
-            picked == hdr_col1 || picked.is_ancestor(&hdr_col1),
-            "Expected picked widget at top of scrolled table to be inside header cell, got {:?}",
-            picked
-        );
-
-        win.close();
+        });
     }
 }
 

@@ -78,9 +78,25 @@ impl MySqlDriver {
             let new_pool =
                 Self::create_pool(&self.host, self.port, &self.username, &self.password, target)
                     .await?;
-            *write_guard = (target.to_string(), new_pool);
+            let (_, old_pool) = std::mem::replace(&mut *write_guard, (target.to_string(), new_pool));
+            old_pool.close().await;
         }
         Ok(write_guard.1.clone())
+    }
+
+    async fn reset_active_pool(&self, db_name: &str) {
+        let mut write_guard = self.active_pool.write().await;
+        let target = if db_name.trim().is_empty() {
+            write_guard.0.clone()
+        } else {
+            db_name.trim().to_string()
+        };
+        if let Ok(new_pool) =
+            Self::create_pool(&self.host, self.port, &self.username, &self.password, &target).await
+        {
+            let (_, old_pool) = std::mem::replace(&mut *write_guard, (target, new_pool));
+            old_pool.close().await;
+        }
     }
 
     fn qualified_table(db_name: &str, table: &str) -> String {
@@ -248,7 +264,11 @@ impl MySqlDriver {
             } else if columns.is_empty() {
                 String::new()
             } else {
-                let escaped_inner = trimmed.replace('\\', "\\\\").replace('\'', "''");
+                let escaped_inner = trimmed
+                    .replace('\\', "\\\\\\\\")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_")
+                    .replace('\'', "''");
                 let pattern = format!("%{}%", escaped_inner);
                 let predicates: Vec<String> = columns
                     .iter()
@@ -1134,21 +1154,26 @@ impl DatabaseDriver for MySqlDriver {
         if updates.is_empty() {
             return Ok(0);
         }
-        let pool = self.pool_for_db(db_name).await?;
-        let mut total_affected = 0u64;
-
+        let mut stmts = Vec::with_capacity(updates.len() + 2);
+        stmts.push("BEGIN".to_string());
         for upd in updates {
-            let Some(sql) = Self::format_update_row_stmt(db_name, table, upd)? else {
-                continue;
-            };
-            let res = sqlx::raw_sql(&sql)
-                .execute(&pool)
-                .await
-                .with_context(|| format!("Failed to update row: {}", sql))?;
-            total_affected += res.rows_affected();
+            if let Some(sql) = Self::format_update_row_stmt(db_name, table, upd)? {
+                stmts.push(sql);
+            }
         }
+        if stmts.len() == 1 {
+            return Ok(0);
+        }
+        stmts.push("COMMIT".to_string());
+        let batch_sql = stmts.join(";\n");
 
-        Ok(total_affected)
+        let pool = self.pool_for_db(db_name).await?;
+        let res = sqlx::raw_sql(&batch_sql)
+            .execute(&pool)
+            .await
+            .with_context(|| format!("Failed to update row(s) in {}.{}", db_name, table))?;
+
+        Ok(res.rows_affected())
     }
 
     async fn insert_row(
@@ -1175,19 +1200,21 @@ impl DatabaseDriver for MySqlDriver {
         if pks.is_empty() {
             return Ok(0);
         }
-        let pool = self.pool_for_db(db_name).await?;
-        let mut deleted = 0u64;
-
+        let mut stmts = Vec::with_capacity(pks.len() + 2);
+        stmts.push("BEGIN".to_string());
         for pk in pks {
-            let sql = Self::format_delete_row_stmt(db_name, table, pk)?;
-            let res = sqlx::raw_sql(&sql)
-                .execute(&pool)
-                .await
-                .with_context(|| format!("Failed to delete row: {}", sql))?;
-            deleted += res.rows_affected();
+            stmts.push(Self::format_delete_row_stmt(db_name, table, pk)?);
         }
+        stmts.push("COMMIT".to_string());
+        let batch_sql = stmts.join(";\n");
 
-        Ok(deleted)
+        let pool = self.pool_for_db(db_name).await?;
+        let res = sqlx::raw_sql(&batch_sql)
+            .execute(&pool)
+            .await
+            .with_context(|| format!("Failed to delete row(s) from {}.{}", db_name, table))?;
+
+        Ok(res.rows_affected())
     }
 
     async fn get_relations(&self, db_name: &str, table: &str) -> Result<Vec<ForeignKeyInfo>> {
@@ -1582,17 +1609,15 @@ impl DatabaseDriver for MySqlDriver {
             "SET FOREIGN_KEY_CHECKS = 0;\nSET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO';\n{};\nSET FOREIGN_KEY_CHECKS = 1;",
             insert_sql
         );
-        sqlx::raw_sql(&wrapped_sql)
-            .execute(&pool)
-            .await
-            .map_err(|e| {
-                anyhow!(
-                    "Failed to insert batch into {}: {}\n\nStatement: {}",
-                    fq_table,
-                    e,
-                    truncate_sql_preview(&insert_sql, 240)
-                )
-            })?;
+        if let Err(e) = sqlx::raw_sql(&wrapped_sql).execute(&pool).await {
+            self.reset_active_pool(db_name).await;
+            return Err(anyhow!(
+                "Failed to insert batch into {}: {}\n\nStatement: {}",
+                fq_table,
+                e,
+                truncate_sql_preview(&insert_sql, 240)
+            ));
+        }
         Ok(rows.len() as u64)
     }
 
@@ -1642,17 +1667,15 @@ impl DatabaseDriver for MySqlDriver {
                 "SET FOREIGN_KEY_CHECKS = 0;\n{}\n{};\nSET FOREIGN_KEY_CHECKS = 1;",
                 sql_mode_stmt, trimmed
             );
-            sqlx::raw_sql(&wrapped_sql)
-                .execute(&pool)
-                .await
-                .map_err(|e| {
-                    anyhow!(
-                        "SQL error in database '{}': {}\n\nStatement: {}",
-                        if db_name.is_empty() { "(default)" } else { db_name },
-                        e,
-                        truncate_sql_preview(trimmed, 240)
-                    )
-                })?;
+            if let Err(e) = sqlx::raw_sql(&wrapped_sql).execute(&pool).await {
+                self.reset_active_pool(db_name).await;
+                return Err(anyhow!(
+                    "SQL error in database '{}': {}\n\nStatement: {}",
+                    if db_name.is_empty() { "(default)" } else { db_name },
+                    e,
+                    truncate_sql_preview(trimmed, 240)
+                ));
+            }
         }
 
         Ok(())
@@ -2082,6 +2105,20 @@ mod tests {
         assert_eq!(
             data_sql2,
             "SELECT * FROM `shop`.`users` WHERE `id` > 10 LIMIT 25 OFFSET 0"
+        );
+
+        let q3 = ContentQuery {
+            limit: 10,
+            offset: 0,
+            sort_column: None,
+            sort_direction: SortDirection::Asc,
+            search_text: "50%_off\\".to_string(),
+        };
+        let (count_sql3, _) =
+            MySqlDriver::format_table_content_queries("shop", "users", &cols, &q3);
+        assert_eq!(
+            count_sql3,
+            "SELECT COUNT(*) FROM `shop`.`users` WHERE (CAST(`id` AS CHAR) LIKE '%50\\%\\_off\\\\\\\\%' OR CAST(`name` AS CHAR) LIKE '%50\\%\\_off\\\\\\\\%')"
         );
     }
 }

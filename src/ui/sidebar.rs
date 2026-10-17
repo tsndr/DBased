@@ -349,6 +349,25 @@ impl WorkspaceSidebar {
         self.selected_db.borrow().clone()
     }
 
+    pub fn current_table(&self) -> Option<String> {
+        self.selected_table.borrow().clone()
+    }
+
+    pub fn clear(&self) {
+        self.transfer_controller.clear();
+        self.window_title.set_title("DBased");
+        self.window_title.set_subtitle("Connected");
+        *self.suppress_db_signal.borrow_mut() = true;
+        let count = self.db_model.n_items();
+        self.db_model.splice(0, count, &[]);
+        *self.suppress_db_signal.borrow_mut() = false;
+        self.selected_db.borrow_mut().clear();
+        *self.selected_table.borrow_mut() = None;
+        self.all_tables.borrow_mut().clear();
+        self.table_search.set_text("");
+        self.rebuild_table_list();
+    }
+
     pub fn rebuild_table_list(&self) {
         *self.suppress_table_signal.borrow_mut() = true;
         while let Some(child) = self.table_list.first_child() {
@@ -356,7 +375,7 @@ impl WorkspaceSidebar {
         }
 
         let filter = self.table_search.text().to_lowercase();
-        let tables = self.all_tables.borrow();
+        let tables = self.all_tables.borrow().clone();
         let active_table = self.selected_table.borrow().clone();
 
         for tbl in tables.iter() {
