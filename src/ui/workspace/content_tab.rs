@@ -80,16 +80,16 @@ impl LongTextPanelTarget {
 #[derive(Clone)]
 pub struct ContentTab {
     pub root: gtk::Box,
-    content_paned: gtk::Paned,
+    pub(crate) content_paned: gtk::Paned,
     scroll: gtk::ScrolledWindow,
-    grid: gtk::Grid,
+    pub(crate) grid: gtk::Grid,
     editor_panel: gtk::Box,
     panel_title_lbl: gtk::Label,
     panel_subtitle_lbl: gtk::Label,
     panel_status_lbl: gtk::Label,
     panel_null_btn: gtk::Button,
     panel_revert_btn: gtk::Button,
-    panel_buffer: sourceview5::Buffer,
+    pub(crate) panel_buffer: sourceview5::Buffer,
     panel_view: sourceview5::View,
     panel_target: Rc<RefCell<Option<LongTextPanelTarget>>>,
     panel_syncing: Rc<RefCell<bool>>,
@@ -115,7 +115,7 @@ pub struct ContentTab {
     /// Checked row indices for deletion
     selected_rows: Rc<RefCell<Vec<(usize, gtk::CheckButton)>>>,
     /// User-resized widths per column name
-    col_widths: Rc<RefCell<HashMap<String, i32>>>,
+    pub(crate) col_widths: Rc<RefCell<HashMap<String, i32>>>,
     /// Natural full-content widths per column index for the currently rendered grid
     natural_col_widths: Rc<RefCell<Vec<i32>>>,
     /// Header cell widgets per column for dynamic width updates

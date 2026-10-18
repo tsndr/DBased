@@ -10,7 +10,7 @@ APPDIR       := $(DATADIR)/applications
 ICONDIR      := $(DATADIR)/icons/hicolor/scalable/apps
 METAINFODIR  := $(DATADIR)/metainfo
 
-.PHONY: all build install install-files uninstall install-user uninstall-user arch-pkg install-arch clean
+.PHONY: all build install install-files uninstall install-user uninstall-user arch-pkg install-arch screenshots clean
 
 all: build
 
@@ -52,6 +52,9 @@ arch-pkg:
 
 install-arch:
 	makepkg -sfi
+
+screenshots:
+	CARGO="$(CARGO)" ./scripts/update-screenshots.sh
 
 clean:
 	$(CARGO) clean
