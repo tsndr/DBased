@@ -3519,6 +3519,21 @@ mod tests {
                 assert_eq!(hdr_bounds.width(), cell_bounds.width());
             }
 
+            let scroll_w = workspace_content.structure_tab.scroll.width();
+            let idx_scroll_w = workspace_content.structure_tab.idx_scroll.width();
+            assert!(
+                (grid.width() - scroll_w).abs() <= 2,
+                "Structure columns grid width ({}) should fill its panel width ({})",
+                grid.width(),
+                scroll_w
+            );
+            assert!(
+                (idx_grid.width() - idx_scroll_w).abs() <= 2,
+                "Structure indexes grid width ({}) should fill its panel width ({})",
+                idx_grid.width(),
+                idx_scroll_w
+            );
+
             win.close();
             while ctx.iteration(false) {}
         });

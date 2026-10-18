@@ -733,6 +733,14 @@ mod tests {
                 }
             }
 
+            let scroll_w = workspace_content.relations_tab.scroll.width();
+            assert!(
+                (grid.width() - scroll_w).abs() <= 2,
+                "Relations grid width ({}) should fill its panel width ({})",
+                grid.width(),
+                scroll_w
+            );
+
             win.close();
             while ctx.iteration(false) {}
         });

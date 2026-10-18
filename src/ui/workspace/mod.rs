@@ -227,7 +227,25 @@ pub fn compute_auto_column_widths(
             for (idx, &i) in narrow.iter().enumerate() {
                 widths[i] += share + if (idx as i32) < extra { 1 } else { 0 };
             }
+            remaining = 0;
             break;
+        }
+    }
+
+    // Pass 3: If space still remains after all columns have reached at least
+    // max(natural_width, DEFAULT_DATA_COL_WIDTH), distribute the remaining space
+    // evenly across non-manual columns (or all columns if all have manual overrides)
+    // so the table always fills the full width of its surrounding panel.
+    if remaining > 0 && num_cols > 0 {
+        let mut expandable: Vec<usize> = (0..num_cols).filter(|&i| !is_manual[i]).collect();
+        if expandable.is_empty() {
+            expandable = (0..num_cols).collect();
+        }
+        let count = expandable.len() as i32;
+        let share = remaining / count;
+        let extra = remaining % count;
+        for (idx, &i) in expandable.iter().enumerate() {
+            widths[i] += share + if (idx as i32) < extra { 1 } else { 0 };
         }
     }
 
@@ -303,6 +321,8 @@ where
 
     let is_resizing = Rc::new(RefCell::new(false));
     let start_width = Rc::new(RefCell::new(initial_width));
+    let panel_fill_state: Rc<RefCell<(i32, i32, Option<(gtk::Box, i32)>)>> =
+        Rc::new(RefCell::new((0, 0, None)));
 
     let drag = gtk::GestureDrag::new();
     drag.set_propagation_phase(gtk::PropagationPhase::Capture);
@@ -312,6 +332,7 @@ where
         let handle_ref = handle.clone();
         let is_resizing = is_resizing.clone();
         let start_width = start_width.clone();
+        let panel_fill_state = panel_fill_state.clone();
         drag.connect_drag_begin(move |gesture, start_x, _start_y| {
             let alloc_w = cell_box_ref
                 .width()
@@ -320,6 +341,56 @@ where
             if start_x >= (alloc_w - RESIZE_HANDLE_HIT_WIDTH) as f64 {
                 *is_resizing.borrow_mut() = true;
                 *start_width.borrow_mut() = alloc_w;
+
+                let mut vp_w = 0;
+                let mut rest_w = 0;
+                let mut filler: Option<(gtk::Box, i32)> = None;
+                if let Some(grid) = cell_box_ref
+                    .parent()
+                    .and_then(|p| p.downcast::<gtk::Grid>().ok())
+                {
+                    if let Some(vp) = grid.parent() {
+                        vp_w = (vp.width() - 2).max(0);
+                    }
+                    let mut row0_cells: Vec<gtk::Box> = Vec::new();
+                    let mut c = 0;
+                    while let Some(w) = grid.child_at(c, 0) {
+                        if let Ok(b) = w.downcast::<gtk::Box>() {
+                            row0_cells.push(b);
+                        }
+                        c += 1;
+                    }
+                    if let Some(this_idx) = row0_cells.iter().position(|b| b == &cell_box_ref) {
+                        let filler_idx = ((this_idx + 1)..row0_cells.len())
+                            .rev()
+                            .find(|&i| {
+                                row0_cells[i]
+                                    .first_child()
+                                    .and_then(|ch| ch.downcast::<gtk::Label>().ok())
+                                    .is_none_or(|lbl| lbl.text() != "Actions")
+                            })
+                            .or_else(|| {
+                                if this_idx + 1 < row0_cells.len() {
+                                    Some(row0_cells.len() - 1)
+                                } else {
+                                    None
+                                }
+                            });
+                        for (i, b) in row0_cells.iter().enumerate() {
+                            if i == this_idx {
+                                continue;
+                            }
+                            let bw = b.width().max(b.width_request()).max(MIN_COLUMN_WIDTH);
+                            if Some(i) == filler_idx {
+                                filler = Some((b.clone(), bw));
+                            } else {
+                                rest_w += bw;
+                            }
+                        }
+                    }
+                }
+                *panel_fill_state.borrow_mut() = (vp_w, rest_w, filler);
+
                 handle_ref.add_css_class("resizing");
                 gesture.set_state(gtk::EventSequenceState::Claimed);
             } else {
@@ -333,9 +404,18 @@ where
         let cell_box_ref = cell_box.clone();
         let is_resizing = is_resizing.clone();
         let start_width = start_width.clone();
+        let panel_fill_state = panel_fill_state.clone();
         drag.connect_drag_update(move |_, offset_x, _offset_y| {
             if *is_resizing.borrow() {
-                let new_w = (*start_width.borrow() + offset_x.round() as i32).max(MIN_COLUMN_WIDTH);
+                let (vp_w, rest_w, ref filler) = *panel_fill_state.borrow();
+                let mut new_w =
+                    (*start_width.borrow() + offset_x.round() as i32).max(MIN_COLUMN_WIDTH);
+                if let Some((ref filler_box, filler_start_w)) = *filler {
+                    let target_filler_w = (vp_w - rest_w - new_w).max(filler_start_w);
+                    filler_box.set_width_request(target_filler_w);
+                } else if vp_w > 0 {
+                    new_w = new_w.max(vp_w - rest_w);
+                }
                 cell_box_ref.set_width_request(new_w);
                 on_resize(new_w);
             }

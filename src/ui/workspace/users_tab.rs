@@ -1710,6 +1710,22 @@ mod tests {
                     assert_eq!(hdr_bounds.width(), cell_bounds.width());
                 }
             }
+            let users_scroll_w = workspace_content.users_tab.scroll.width();
+            assert!(
+                grid.width() >= users_scroll_w - 2,
+                "users grid width ({}) should fill its surrounding panel width ({})",
+                grid.width(),
+                users_scroll_w
+            );
+
+            let perm_grid = &workspace_content.users_tab.perm_grid;
+            let perm_scroll_w = workspace_content.users_tab.perm_scroll.width();
+            assert!(
+                perm_grid.width() >= perm_scroll_w - 2,
+                "permissions grid width ({}) should fill its surrounding panel width ({})",
+                perm_grid.width(),
+                perm_scroll_w
+            );
 
             // Verify UsersTab preserves vertical scroll position when selecting a user row
             let many_users: Vec<DbUser> = (0..25)

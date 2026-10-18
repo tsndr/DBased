@@ -2579,9 +2579,11 @@ mod tests {
         let natural = vec![80, 220, 340];
         let manual = vec![None, None, None];
         let widths = compute_auto_column_widths(&natural, &manual, 900);
-        // Plenty of width: wide columns expand to their full natural widths (220, 340)
-        // and the narrow column expands back to DEFAULT_DATA_COL_WIDTH (160).
-        assert_eq!(widths, vec![160, 220, 340]);
+        // Plenty of width: wide columns expand to their full natural widths (220, 340),
+        // the narrow column expands to DEFAULT_DATA_COL_WIDTH (160), and the remaining
+        // 180px is distributed evenly (+60px each) so the table fills all 900px.
+        assert_eq!(widths, vec![220, 280, 400]);
+        assert_eq!(widths.iter().sum::<i32>(), 900);
     }
 
     #[test]
@@ -2603,8 +2605,18 @@ mod tests {
         let natural = vec![80, 300, 400];
         let manual = vec![None, Some(120), None];
         let widths = compute_auto_column_widths(&natural, &manual, 700);
-        assert_eq!(widths[1], 120);
-        assert_eq!(widths[2], 400);
+        assert_eq!(widths, vec![170, 120, 410]);
+        assert_eq!(widths.iter().sum::<i32>(), 700);
+    }
+
+    #[test]
+    fn test_columns_always_fill_surrounding_panel_width() {
+        // Indexes-style table: 5 auto data columns + 1 fixed Actions column (84px) in a 1100px panel
+        let natural = vec![246, 92, 202, 86, 86, 84];
+        let manual = vec![None, None, None, None, None, Some(84)];
+        let widths = compute_auto_column_widths(&natural, &manual, 1100);
+        assert_eq!(widths[5], 84);
+        assert_eq!(widths.iter().sum::<i32>(), 1100);
     }
 
     #[test]
